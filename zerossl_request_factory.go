@@ -91,6 +91,31 @@ var ApiReqFactory = struct {
 		}
 		url_.RawQuery = q_.Encode()
 		req.URL = url_
+		// // Print the entire URL object.
+		// fmt.Printf("%+v\n", *url_) //Dereference the pointer to print the struct.
+
+		// // Print individual components.
+		// fmt.Println("Scheme:", url_.Scheme)
+		// fmt.Println("User:", url_.User)
+		// if url_.User != nil {
+		// 	fmt.Println("Username:", url_.User.Username())
+		// 	password, _ := url_.User.Password() //Password returns password and a bool if password was set.
+		// 	fmt.Println("Password:", password)
+		// }
+		// fmt.Println("Host:", url_.Host)
+		// fmt.Println("Hostname:", url_.Hostname())
+		// fmt.Println("Port:", url_.Port())
+		// fmt.Println("Path:", url_.Path)
+		// fmt.Println("RawQuery:", url_.RawQuery)
+		// fmt.Println("Fragment:", url_.Fragment)
+
+		// //Print the query parameters as a map
+		// queryParams := url_.Query()
+		// fmt.Println("Query Parameters:", queryParams)
+
+		// //Constructing a URL from a URL struct.
+		// constructedURL := url_.String()
+		// fmt.Println("Constructed URL:", constructedURL)
 		return
 	},
 	GetCertificate: func(accessKey, id string) (req *http.Request) {

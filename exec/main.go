@@ -38,8 +38,9 @@ import (
 const Version = "v1.0.1"
 
 var (
-	renewFlag  = flag.Bool("renew", false, "Renew existing certs only")
-	configFlag = flag.String("config", "", "Config file")
+	renewFlag   = flag.Bool("renew", false, "Renew existing certs only")
+	configFlag  = flag.String("config", "", "Config file")
+	cleanupFlag = flag.Bool("cleanup", false, "Cleanup pending certs only")
 )
 
 var usingConfig *Config
@@ -56,7 +57,7 @@ func main() {
 
 	flag.Parse()
 
-	if !PathExists(*configFlag) {
+	if !fileExistsAndIsFile(*configFlag) {
 		flag.Usage()
 		panic("Config file not found")
 	}
@@ -68,6 +69,9 @@ func main() {
 	usingConfig = usingConfig_
 	// Enable line numbers in logging.
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
+	if usingConfig == nil || usingConfig.LogFile == "" {
+		panic("LogFile is not provided or usingConfig is nil")
+	}
 	logFile_, err := os.OpenFile(usingConfig.LogFile, os.O_CREATE|os.O_APPEND|os.O_RDWR, 0666)
 	if err != nil {
 		fmt.Println("log file create failed")
@@ -102,6 +106,8 @@ func main() {
 	}
 	if *renewFlag {
 		renew()
+	} else if *cleanupFlag {
+		cleanup()
 	} else {
 		issueCerts()
 	}
@@ -438,4 +444,41 @@ func renewCert(id string, conf *CertConf) (err error) {
 		}
 	}
 	return
+}
+
+// // issueCerts issues certs referenced in the config file.
+// func issueCerts() {
+// 	log.Printf("Issuing certs")
+// 	for _, c := range usingConfig.CertConfigs {
+// 		log.Printf("Issuing cert for domain: %v", c.CommonName)
+// 		err := issueCert(&c)
+// 		if err != nil {
+// 			log.Printf("Failed to issue cert for domain %v: %v\n", c.CommonName, err)
+// 		}
+// 	}
+// }
+
+// // issueCert issues a cert for the given domain config.
+// func issueCert(conf *CertConf) (err error) {
+// 	for _, cert := range currentData.Certs {
+// 		// Use ConfID to match.
+// 		if cert.ConfID == conf.ConfID {
+// 			log.Printf("Cert for domain %v already exists, try renew.\n", conf.CommonName)
+// 			err = renewCert(cert.CertID, conf)
+// 			return
+// 		}
+// 	}
+
+// cleanup certs.
+func cleanup() {
+	log.Println("will cleanup pending certs")
+	for _, c := range usingConfig.CertConfigs {
+		client_ := &zerosslIPCert.Client{ApiKey: c.ApiKey}
+		err := client_.CleanUnfinished()
+		if err != nil {
+			log.Printf("Failed to clean unfinished issuing certificate: %v\n", err)
+		}
+		break
+	}
+
 }

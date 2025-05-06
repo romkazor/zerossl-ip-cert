@@ -44,6 +44,15 @@ func PathExists(filePath string) bool {
 	return true
 }
 
+// fileExistsAndIsFile checks if a path exists and is a file.
+func fileExistsAndIsFile(path string) bool {
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return false
+	}
+	return err == nil && !info.IsDir()
+}
+
 // CopyFile copies content of a file from src to dst.
 func CopyFile(srcFile, dstFile string, perm os.FileMode) error {
 	dstDir_ := filepath.Dir(dstFile)
