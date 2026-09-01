@@ -115,3 +115,10 @@ func TestWriteCurrentDataPerm(t *testing.T) {
 		t.Errorf("round trip = %+v", back_.Certs)
 	}
 }
+
+// A missing file must report the read error instead of yielding (nil, nil).
+func TestReadConfigMissingFileErrors(t *testing.T) {
+	if _, err := ReadConfig(filepath.Join(t.TempDir(), "nope.yaml")); err == nil {
+		t.Error("ReadConfig on a missing file returned nil error")
+	}
+}

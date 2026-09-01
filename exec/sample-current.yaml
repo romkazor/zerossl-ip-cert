@@ -4,7 +4,7 @@ certs:
   # Use confId to identify the certificate configuration
   - commonName: 4.3.2.1
     # Match confID in config file
-    confID: xx1
+    confId: xx1
     certId: 1234567890abcdef0
     certFile: /var/local/zerossl/cert0.pem
     keyFile: /var/local/zerossl/key0.pem

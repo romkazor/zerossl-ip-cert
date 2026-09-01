@@ -355,39 +355,38 @@ func (c *Client) CleanUnfinished() (err error) {
 	log.Println("Cleaning unfinished certificates")
 
 	const perPage = 100
-	page := 1
-	max := 1
-
-	for page <= max {
-		certs, err := c.ListCerts("draft,pending_validation", "", strconv.Itoa(perPage), strconv.Itoa(page))
+	// Cancelling removes certificates from the draft,pending_validation result
+	// set, so the window shifts under us: advancing the page number would skip
+	// entries. Always re-read the first page instead, and stop when either the
+	// page comes back empty or a full sweep cancelled nothing.
+	for round_ := 0; ; round_++ {
+		certs, err := c.ListCerts("draft,pending_validation", "", strconv.Itoa(perPage), "1")
 		if err != nil {
 			log.Println("Error fetching certificates:", err)
-			break
+			return err
 		}
-
-		// Update max pages correctly
-		if certs.TotalCount > 0 {
-			max = (certs.TotalCount + perPage - 1) / perPage // Ensures rounding up
+		if certs.ResultCount == 0 || len(certs.Results) == 0 {
+			return nil
 		}
+		log.Printf("Cleaning round %d, ResultCount: %d, TotalCount: %d",
+			round_+1, certs.ResultCount, certs.TotalCount)
 
-		log.Printf("Processing page %d/%d, ResultCount: %d, TotalCount: %d", page, max, certs.ResultCount, certs.TotalCount)
-
+		cancelled_ := 0
 		for _, cert := range certs.Results {
-			if cert.Status == CertStatus.Draft || cert.Status == CertStatus.PendingValidation {
-				log.Printf("Cleaning %s in %s status, ID: %s", cert.CommonName, cert.Status, cert.ID)
-				if err := c.CancelCert(cert.ID); err != nil {
-					log.Println("Error canceling certificate:", err)
-				}
+			if cert.Status != CertStatus.Draft && cert.Status != CertStatus.PendingValidation {
+				continue
 			}
+			log.Printf("Cleaning %s in %s status, ID: %s", cert.CommonName, cert.Status, cert.ID)
+			if err := c.CancelCert(cert.ID); err != nil {
+				log.Println("Error canceling certificate:", err)
+				continue
+			}
+			cancelled_++
 		}
-
-		// Stop if there are no more certificates to process
-		if certs.ResultCount == 0 {
-			break
+		// Nothing moved: either the page holds only certificates we cannot
+		// cancel, or every cancel failed. Retrying would loop forever.
+		if cancelled_ == 0 {
+			return nil
 		}
-
-		page++ // Move to next page
 	}
-
-	return nil
 }

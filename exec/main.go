@@ -52,7 +52,7 @@ var currentDataFilePath string
 func main() {
 	flag.Usage = func() {
 		w := flag.CommandLine.Output()
-		_, _ = fmt.Fprintf(w, "\nVersion: %v\n\nUsage: %v [ -renew ] -config CONFIG_FILE\n\n",
+		_, _ = fmt.Fprintf(w, "\nVersion: %v\n\nUsage: %v [ -renew | -cleanup ] -config CONFIG_FILE\n\n",
 			Version, filepath.Base(os.Args[0]))
 		flag.PrintDefaults()
 	}
@@ -303,7 +303,10 @@ func issueCertImpl(conf *CertConf, replacementFor string) (certID string, err er
 
 func verifyHttpCsrHash(client *zerosslIPCert.Client, certInfo *zerosslIPCert.CertificateInfoModel) (err error) {
 	for retrying_ := 0; retrying_ < 20; retrying_++ {
-		verifyRsp_, err := client.VerifyDomains(certInfo.ID, zerosslIPCert.VerifyDomainsMethod.HttpCsrHash, "")
+		var verifyRsp_ zerosslIPCert.VerifyDomainsModel
+		// Plain "=", not ":=": a new err here would hide every loop failure
+		// from the named return value.
+		verifyRsp_, err = client.VerifyDomains(certInfo.ID, zerosslIPCert.VerifyDomainsMethod.HttpCsrHash, "")
 		if err != nil {
 			log.Printf("verify error: %v\n", err)
 			time.Sleep(time.Second * 15)
@@ -311,7 +314,8 @@ func verifyHttpCsrHash(client *zerosslIPCert.Client, certInfo *zerosslIPCert.Cer
 		}
 		// NOTICE: ZeroSSL always return "Success:false" in HttpCsrHash verification.
 		log.Printf("domains verification result: %+v\n", verifyRsp_)
-		certInfoTmp_, err := client.GetCert(certInfo.ID)
+		var certInfoTmp_ zerosslIPCert.CertificateInfoModel
+		certInfoTmp_, err = client.GetCert(certInfo.ID)
 		if err != nil {
 			log.Printf("get cert error: %v\n", err)
 			time.Sleep(time.Second * 15)
@@ -554,7 +558,6 @@ func cleanup() {
 		if err != nil {
 			log.Printf("Failed to clean unfinished issuing certificate: %v\n", err)
 		}
-		break
 	}
 
 }

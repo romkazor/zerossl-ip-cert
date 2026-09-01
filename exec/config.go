@@ -68,9 +68,11 @@ func (c *Config) ShouldRevokeOldOnRenew() bool {
 // ReadConfig reads the config file and returns a Config struct.
 func ReadConfig(path string) (config *Config, err error) {
 	var input_ []byte
-	input_, err = ioutil.ReadFile(path)
-	err = yaml.Unmarshal(input_, &config)
-	if err != nil {
+	// The read error must not be swallowed by the unmarshal result below.
+	if input_, err = ioutil.ReadFile(path); err != nil {
+		return nil, err
+	}
+	if err = yaml.Unmarshal(input_, &config); err != nil {
 		return nil, err
 	}
 	return
@@ -91,7 +93,9 @@ type CurrentCertData struct {
 // ReadCurrentData reads the current data file and returns a CurrentData struct.
 func ReadCurrentData(path string) (data *CurrentData, err error) {
 	var input_ []byte
-	input_, err = ioutil.ReadFile(path)
+	if input_, err = ioutil.ReadFile(path); err != nil {
+		return nil, err
+	}
 	if err = yaml.Unmarshal(input_, &data); err != nil {
 		return nil, err
 	}
