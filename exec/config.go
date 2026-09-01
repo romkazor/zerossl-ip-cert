@@ -19,7 +19,6 @@ package main
 import (
 	"gopkg.in/yaml.v3"
 	"io/ioutil"
-	"os"
 )
 
 type CertConf struct {
@@ -103,7 +102,8 @@ func ReadCurrentData(path string) (data *CurrentData, err error) {
 func WriteCurrentData(path string, data *CurrentData) (err error) {
 	var output []byte
 	output, err = yaml.Marshal(data)
-	if err = ioutil.WriteFile(path, output, os.ModePerm); err != nil {
+	// 0600: current.yaml maps config ids to issued certificate hashes.
+	if err = ioutil.WriteFile(path, output, 0600); err != nil {
 		return err
 	}
 	return

@@ -68,7 +68,9 @@ func KeyGeneratorWrapper(keyType string, keyBits int, keyCurve string) (key inte
 // WritePrivKeyWrapper is a wrapper for writing private keys.
 func WritePrivKeyWrapper(keyType string, key interface{}, keyFile string) (err error) {
 	keyType_ := strings.ToUpper(keyType)
-	file_, err := os.OpenFile(keyFile, os.O_WRONLY|os.O_CREATE|os.O_APPEND, os.ModePerm)
+	// 0600 and O_TRUNC: this is a private key, and appending would corrupt a
+	// re-issued one by leaving the previous PEM block in place.
+	file_, err := os.OpenFile(keyFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		log.Println(err)
 		return

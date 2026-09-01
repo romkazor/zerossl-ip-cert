@@ -74,7 +74,13 @@ func main() {
 	if usingConfig == nil || usingConfig.LogFile == "" {
 		panic("LogFile is not provided or usingConfig is nil")
 	}
-	logFile_, err := os.OpenFile(usingConfig.LogFile, os.O_CREATE|os.O_APPEND|os.O_RDWR, 0666)
+	// The log file usually lives inside dataDir, which may not exist yet on a
+	// first run, so its directory has to be created before opening it.
+	if err = CreateDirIfNotExists(filepath.Dir(usingConfig.LogFile), 0700); err != nil {
+		fmt.Println("log directory create failed")
+		panic(err)
+	}
+	logFile_, err := os.OpenFile(usingConfig.LogFile, os.O_CREATE|os.O_APPEND|os.O_RDWR, 0640)
 	if err != nil {
 		fmt.Println("log file create failed")
 		panic(err)
@@ -85,7 +91,8 @@ func main() {
 
 	log.Printf("Using config file: %v", *configFlag)
 
-	err = CreateDirIfNotExists(usingConfig.DataDir, os.ModePerm)
+	// The data dir holds current.yaml and the temporary private key.
+	err = CreateDirIfNotExists(usingConfig.DataDir, 0700)
 	if err != nil {
 		flag.Usage()
 		panic(err)
@@ -199,9 +206,16 @@ func issueCertImpl(conf *CertConf, replacementFor string) (certID string, err er
 		return
 	}
 	log.Printf("Creating temp dir: %v\n", tempDir_)
-	if err = CreateDirIfNotExists(tempDir_, os.ModePerm); err != nil {
+	// 0700: the temp dir holds the private key until it is installed.
+	if err = CreateDirIfNotExists(tempDir_, 0700); err != nil {
 		return
 	}
+	// Removed on every exit path, not just the successful one.
+	defer func() {
+		if rmErr_ := os.RemoveAll(tempDir_); rmErr_ != nil {
+			log.Printf("failed to clean temp dir %v: %v\n", tempDir_, rmErr_)
+		}
+	}()
 	client_ := apiClient(conf.ApiKey)
 	// Generate PrivateKey.
 	log.Printf("Generating private key for %v\n", conf.CommonName)
@@ -222,7 +236,7 @@ func issueCertImpl(conf *CertConf, replacementFor string) (certID string, err er
 		return
 	}
 	csrStr_ := zerosslIPCert.GetCSRString(csr_)
-	log.Printf("CSR for %v: %v\n", conf.CommonName, csrStr_)
+	log.Printf("CSR generated for %v (%v bytes)\n", conf.CommonName, len(csrStr_))
 	if csrStr_ == "" {
 		log.Println("failed to get csr string")
 		return
@@ -257,7 +271,7 @@ func issueCertImpl(conf *CertConf, replacementFor string) (certID string, err er
 		log.Println(err)
 		return
 	}
-	log.Printf("cert + ca: %+v\n", cert_)
+	log.Printf("downloaded cert and ca bundle for %v\n", conf.CommonName)
 	fullChainPem_ := fmt.Sprintf("%s\n%s\n", strings.TrimSpace(cert_.Certificate), strings.TrimSpace(cert_.CaBundle))
 	// Write cert to file.
 	file_, err := os.Create(tempCertPath_)
@@ -270,11 +284,11 @@ func issueCertImpl(conf *CertConf, replacementFor string) (certID string, err er
 		return
 	}
 	// Copy cert files to dest.
-	if err = CopyFile(tempCertPath_, conf.CertFile, os.ModePerm); err != nil {
+	if err = CopyFile(tempCertPath_, conf.CertFile, 0644); err != nil {
 		log.Println(err)
 		return
 	}
-	if err = CopyFile(tempPrivKeyPath_, conf.KeyFile, os.ModePerm); err != nil {
+	if err = CopyFile(tempPrivKeyPath_, conf.KeyFile, 0600); err != nil {
 		log.Println(err)
 		return
 	}
@@ -283,9 +297,6 @@ func issueCertImpl(conf *CertConf, replacementFor string) (certID string, err er
 		log.Println(err)
 		return
 	}
-	// Clean temp files.
-	log.Printf("Cleaning temp files\n")
-	_ = os.RemoveAll(tempDir_)
 	certID = certInfo_.ID
 	return
 }
