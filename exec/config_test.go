@@ -39,6 +39,26 @@ func TestReadConfigSample(t *testing.T) {
 			t.Errorf("sample cert config missing confId/commonName: %+v", c_)
 		}
 	}
+	if !conf_.ShouldRevokeOldOnRenew() {
+		t.Error("sample config should keep revokeOldOnRenew enabled")
+	}
+}
+
+// Every entry of the sample state file must map to a config id, which is how
+// renewal finds the config for a certificate.
+func TestReadCurrentDataSample(t *testing.T) {
+	data_, err := ReadCurrentData("sample-current.yaml")
+	if err != nil {
+		t.Fatalf("ReadCurrentData(sample-current.yaml): %v", err)
+	}
+	if len(data_.Certs) == 0 {
+		t.Fatal("sample state file has no certs")
+	}
+	for _, c_ := range data_.Certs {
+		if c_.ConfID == "" {
+			t.Errorf("sample state entry has no confId (yaml key typo?): %+v", c_)
+		}
+	}
 }
 
 // Round trip through a temp dir, so the test never mutates a tracked file.
@@ -62,6 +82,12 @@ func TestWriteCurrentDataRoundTrip(t *testing.T) {
 		if c_ != want_.Certs[i_] {
 			t.Errorf("cert[%d] = %+v, want %+v", i_, c_, want_.Certs[i_])
 		}
+	}
+}
+
+func TestReadCurrentDataMissingFile(t *testing.T) {
+	if _, err := ReadCurrentData(filepath.Join(t.TempDir(), "nope.yaml")); err == nil {
+		t.Error("ReadCurrentData on a missing file returned nil error")
 	}
 }
 

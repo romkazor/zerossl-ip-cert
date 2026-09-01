@@ -17,9 +17,14 @@
 package main
 
 import (
+	"crypto/elliptic"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"strings"
 	"testing"
 
 	zerosslIPCert "github.com/tinkernels/zerossl-ip-cert"
@@ -133,4 +138,76 @@ func TestServeValidationFilesStops(t *testing.T) {
 		t.Fatalf("port still busy after shutdown: %v", err)
 	}
 	_ = ln2_.Close()
+}
+
+// Feeds a real ZeroSSL challenge through the built-in server, so the parsing of
+// file_validation_url_http / file_validation_content is checked against the API
+// rather than against a hand-written fixture. Needs ZEROSSL_API_KEY and
+// ZEROSSL_ALLOW_WRITE; the draft it creates is cancelled again.
+func TestIntegrationValidationServerServesRealChallenge(t *testing.T) {
+	key_ := os.Getenv("ZEROSSL_API_KEY")
+	if key_ == "" || os.Getenv("ZEROSSL_ALLOW_WRITE") == "" {
+		t.Skip("ZEROSSL_API_KEY and ZEROSSL_ALLOW_WRITE are required for this test")
+	}
+	c_ := zerosslIPCert.NewClient(key_, zerosslIPCert.DefaultRPS)
+
+	const ip_ = "203.0.113.13"
+	privKey_ := zerosslIPCert.GenEccKey(elliptic.P256())
+	csr_, err := zerosslIPCert.GenEccCSR(pkix.Name{CommonName: ip_}, privKey_, x509.ECDSAWithSHA256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certInfo_, err := c_.CreateCert(ip_, zerosslIPCert.GetCSRString(csr_), "90", "1", "")
+	if err != nil {
+		t.Fatalf("CreateCert: %v", err)
+	}
+	defer func() {
+		if err := c_.CancelCert(certInfo_.ID); err != nil {
+			t.Errorf("CancelCert(%v): %v", certInfo_.ID, err)
+		}
+	}()
+	t.Logf("draft %v for %v", certInfo_.ID, ip_)
+
+	files_, err := validationFiles(&certInfo_)
+	if err != nil {
+		t.Fatalf("validationFiles on a real cert info: %v", err)
+	}
+	var path_, want_ string
+	for p_, c := range files_ {
+		path_, want_ = p_, c
+	}
+	if !strings.HasPrefix(path_, "/.well-known/pki-validation/") {
+		t.Errorf("challenge path = %q, want it under /.well-known/pki-validation/", path_)
+	}
+	t.Logf("challenge path %v, %d bytes of content", path_, len(want_))
+
+	ln_, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop_ := serveValidationFiles(ln_, files_)
+	defer stop_()
+
+	client_ := &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	resp_, err := client_.Get("http://" + ln_.Addr().String() + path_)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp_.Body.Close()
+	if resp_.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp_.StatusCode)
+	}
+	body_, err := io.ReadAll(resp_.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body_) != want_ {
+		t.Errorf("served %q, want %q", body_, want_)
+	}
+	// ZeroSSL expects the three lines exactly as delivered.
+	if lines_ := strings.Split(string(body_), "\n"); len(lines_) != 3 {
+		t.Errorf("served %d lines, want 3: %q", len(lines_), body_)
+	}
 }

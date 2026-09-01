@@ -12,10 +12,37 @@ windows_amd64_dist = dist/zerossl-ip-cert-windows-amd64
 windows_386_dist = dist/zerossl-ip-cert-windows-386
 
 
-.PHONY: release linux-amd64 linux-386 linux-arm linux-arm64 macos-amd64 macos-arm64 windows-amd64 windows-386
+.PHONY: release build test test-integration vet fmt check clean \
+	linux-amd64 linux-386 linux-arm linux-arm64 macos-amd64 macos-arm64 windows-amd64 windows-386
 .DEFAULT_GOAL := release
 
 release: linux-amd64 linux-386 linux-arm linux-arm64 macos-amd64 macos-arm64 windows-amd64 windows-386
+
+# Build for the host platform only.
+build:
+	go build $(build_flags) -o $(exec_file) ./exec
+
+# Offline test suite. The live API tests skip themselves without ZEROSSL_API_KEY.
+test:
+	go test ./...
+
+# Live API tests. Read-only unless ZEROSSL_ALLOW_WRITE is also set, and mind the
+# free-account quota: 3 slots, counting draft, pending, issued and expired.
+test-integration:
+	@test -n "$$ZEROSSL_API_KEY" || (echo "ZEROSSL_API_KEY is not set" && exit 1)
+	go test -count=1 -v -run Integration ./...
+
+vet:
+	go vet ./...
+
+fmt:
+	gofmt -l -w . exec
+
+# What CI runs.
+check: vet test
+
+clean:
+	rm -rf dist $(exec_file)
 
 linux-amd64:
 	mkdir -p $(linux_amd64_dist)

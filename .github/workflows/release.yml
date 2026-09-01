@@ -16,13 +16,17 @@ jobs:
    release:
     runs-on: ubuntu-latest
     steps:
+      - name: Check out code into the Go module directory
+        uses: actions/checkout@v3
+
       - name: Set up Go 1.23.7
         uses: actions/setup-go@v3
         with:
           go-version: 1.23.7
 
-      - name: Check out code into the Go module directory
-        uses: actions/checkout@v3
+      # Never cut a release out of a tree that does not pass vet and tests.
+      - name: Check
+        run: make check
 
       - name: Build
         run: make release
