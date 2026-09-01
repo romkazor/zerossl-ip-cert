@@ -282,7 +282,11 @@ reject every perfectly normal verification response. Any future `success` check 
 | `GET /certificates/{unknown}` | `code 2803`, `certificate_not_found` |
 | `download/return` on a draft | `code 2832`, `certificate_not_issued` |
 | Full issue → `revoke(Superseded)` | status becomes `revoked`; the quota slot is **not** released — see the correction below |
-| `POST /certificates` at the cap | `code 2817`, `certificate_limit_reached` — no draft is created |
+| `POST /certificates` at the cap, plain | `code 2817`, `certificate_limit_reached` — no draft is created |
+| `POST /certificates` at the cap, with `replacement_for_certificate` | **accepted**, draft created — the limit is not checked here |
+| that same draft, challenge served `200`/no redirects | never leaves `pending_validation` (11 min observed, ~2 min is normal) |
+| `POST /certificates` for an IP that already has a live cert on **another** account | `code 2839`, `duplicate_certificates_found`; `strict_domains: 0` does not lift it |
+| `GET /certificates/{id}` for another account's certificate | `code 2801`, `permission_denied` |
 | `search=203.0.113` | returns `203.0.113.10` — search matches substrings |
 
 The error object is exactly `{"code":int,"type":string,"info":string}`, which is what `ApiErrorModel`
@@ -342,6 +346,33 @@ the evidence equally well:
 
 Do not write either down as fact until one is actually observed. The operational conclusion is the same
 either way: **never spend slots on live experiments against an account that carries production.**
+
+### Where the limit actually bites, and the wall next to it (2026-09-01)
+
+Two behaviours found by running the tool against a capped account, both of which change how a failure looks:
+
+**The allowance is enforced at issuance, not at creation.** A create carrying
+`replacement_for_certificate` is accepted on an account already over its limit — the draft appears, the
+challenge is published, `VerifyDomains` is accepted — and then the certificate simply never becomes
+`issued`. Observed stuck in `pending_validation` for eleven minutes with the challenge answering `200` and
+no redirects, against roughly two minutes on a healthy account. A plain create on the same account is
+refused outright with `2817`.
+
+This is almost certainly the shape of the June 2026 production failure, and it is why `waitCert2BReady` now
+reports the status it got stuck in plus `Client.CountOccupiedSlots()`: a bare "timeout of waiting cert to be
+ready" points nowhere near the cause.
+
+**An identifier that already has a live certificate cannot get another one, on any account.**
+`POST /certificates` for `<ip>` answers `2839 duplicate_certificates_found` while a valid certificate for
+that `<ip>` exists — including one held by a *different* ZeroSSL account. `strictDomains: 0` does not lift
+it, and the same account creates certificates for unrelated identifiers without complaint. Only a create
+declared as a replacement of a certificate **the account itself owns** gets through.
+
+The practical consequence: **moving a certificate to a fresh account is not a simple key swap.** The old
+certificate has to be out of the way first, and neither route is clean — revoking it is irreversible and it
+is unverified whether that even lifts `2839`, while waiting for expiry means a scheduled gap. Plan the move
+around this, or move off ZeroSSL: Let's Encrypt issues IP certificates under its `shortlived` profile
+(`Identifier Types: DNS, IP`, 160 hours), where neither the allowance nor the duplicate wall exists.
 
 ### Parameters and values
 

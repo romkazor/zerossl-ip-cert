@@ -377,6 +377,33 @@ func (c *Client) ResolveIssuedCert(commonName string) (cert CertificateInfoModel
 	return cert, nil
 }
 
+// QuotaStatuses are the certificate statuses that occupy a slot in the account's
+// certificate allowance.
+//
+// `revoked` belongs in this list. Verified against the live API on 2026-09-01: an
+// account holding 1 issued and 3 revoked certificates reports 4 of 3 used and
+// refuses to create anything. Only `cancelled` is free, and cancelling requires a
+// certificate that was never issued. Leaving `revoked` out of a quota query is the
+// mistake that produced a wrong conclusion once already -- see CLAUDE.md section 6.
+var QuotaStatuses = []string{
+	CertStatus.Draft,
+	CertStatus.PendingValidation,
+	CertStatus.Issued,
+	CertStatus.Revoked,
+	CertStatus.Expired,
+}
+
+// CountOccupiedSlots reports how many certificates currently count against the
+// account's allowance. It is a diagnostic: the plan limit itself is not exposed by
+// the API, so the caller can only compare the number against a limit it knows.
+func (c *Client) CountOccupiedSlots() (int, error) {
+	rsp_, err := c.ListCerts(strings.Join(QuotaStatuses, ","), "", "1000", "1")
+	if err != nil {
+		return 0, err
+	}
+	return rsp_.TotalCount, nil
+}
+
 // CleanUnfinished cleans up unfinished certificates.
 func (c *Client) CleanUnfinished() (err error) {
 	log.Println("Cleaning unfinished certificates")

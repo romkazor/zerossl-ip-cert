@@ -263,3 +263,51 @@ func (t rewriteHost) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	return rt_.RoundTrip(req)
 }
+
+// The quota query must ask for "revoked" as well. Leaving it out is what made an
+// earlier check conclude that revoking frees a slot: the certificate dropped out of
+// the result set because the status was not requested, not because a slot came back.
+func TestQuotaStatusesIncludeRevoked(t *testing.T) {
+	want_ := map[string]bool{
+		CertStatus.Draft: false, CertStatus.PendingValidation: false,
+		CertStatus.Issued: false, CertStatus.Revoked: false, CertStatus.Expired: false,
+	}
+	for _, s_ := range QuotaStatuses {
+		if _, ok_ := want_[s_]; !ok_ {
+			t.Errorf("unexpected status %q in QuotaStatuses", s_)
+		}
+		want_[s_] = true
+	}
+	for s_, seen_ := range want_ {
+		if !seen_ {
+			t.Errorf("QuotaStatuses is missing %q", s_)
+		}
+	}
+	if len(QuotaStatuses) != len(want_) {
+		t.Errorf("QuotaStatuses = %v, want %d distinct statuses", QuotaStatuses, len(want_))
+	}
+}
+
+func TestCountOccupiedSlots(t *testing.T) {
+	var gotStatus_ string
+	srv_ := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotStatus_ = r.URL.Query().Get("certificate_status")
+		_, _ = io.WriteString(w, `{"total_count":4,"result_count":4,"results":[]}`)
+	}))
+	defer srv_.Close()
+
+	c_ := NewClient("k", 100)
+	c_.HTTPClient = srv_.Client()
+	c_.HTTPClient.Transport = rewriteHost{base: srv_.URL, rt: srv_.Client().Transport}
+
+	got_, err := c_.CountOccupiedSlots()
+	if err != nil {
+		t.Fatalf("CountOccupiedSlots: %v", err)
+	}
+	if got_ != 4 {
+		t.Errorf("CountOccupiedSlots = %d, want 4", got_)
+	}
+	if !strings.Contains(gotStatus_, CertStatus.Revoked) {
+		t.Errorf("certificate_status = %q, must contain %q", gotStatus_, CertStatus.Revoked)
+	}
+}
