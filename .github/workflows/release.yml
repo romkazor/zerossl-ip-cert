@@ -38,5 +38,11 @@ jobs:
         with:
           allowUpdates: true
           artifacts: "dist/*.tar.gz"
+          # Auto-generated notes are a reasonable starting point for a brand new
+          # release, but a re-run must not wipe notes that were written by hand:
+          # without the omit* flags below this step overwrites the body and the
+          # name of an existing release every time it runs.
           generateReleaseNotes: true
+          omitBodyDuringUpdate: true
+          omitNameDuringUpdate: true
           token: ${{ secrets.GITHUB_TOKEN }}
