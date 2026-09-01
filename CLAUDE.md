@@ -376,16 +376,35 @@ certificate has to be gone first, and neither route is clean — revoking it is 
 unverified whether that even lifts `2839`, while waiting for expiry means a scheduled gap. Given that
 renewal on the existing account works indefinitely, the honest answer is usually *do not move accounts*.
 
-### Issuance latency
+### Issuance latency, and why the tool no longer cares
 
-Measured on one host with an identical challenge, minutes apart: **90 seconds** twice, and **over 11
-minutes** once. `waitCert2BReady` used to give up after 5 minutes, report a timeout, and abandon a
-certificate that was on its way to being issued — which then sat there occupying a slot. The bound is now
-`waitCertAttempts = 30` (15 minutes), and each poll is logged instead of the tool going quiet.
+Measured on one host with an identical challenge, minutes apart: **90 seconds** on four occasions, and
+**stuck past 11 and past 15 minutes** on two others. Slot occupancy does not explain it — successes and
+stalls both happened at 4 and at 6 occupied slots — and the stall has not reproduced since. Treat the cause
+as unknown; a stuck `pending_validation` says nothing about why. `accountHint` appends the slot count to a
+timeout as context only, never as a diagnosis.
 
-This is the most likely shape of the June 2026 production failure, and it is a reminder that a stuck
-`pending_validation` says nothing about its own cause. `accountHint` appends the slot count to the timeout
-as context only — never read it as the diagnosis.
+Chasing the right timeout is the wrong fix anyway, because the old failure mode was not the waiting but the
+**abandoning**: on timeout the tool dropped the certificate, ZeroSSL issued it minutes later, and it sat
+there occupying an account slot with its private key already deleted — unusable forever. Two slots were lost
+that way in one afternoon.
+
+So a requested certificate is now recoverable. `rememberPending` writes `pendingCertId` into `current.yaml`
+and keeps that certificate's private key under `{dataDir}/pending/<id>.pem` (0600) the moment `CreateCert`
+returns. `resumePendingCert` runs before any new request and, depending on what the API says:
+
+| Status of the pending certificate | What happens |
+|---|---|
+| `issued` | downloaded and installed with the kept key, state promoted, key removed |
+| `draft` / `pending_validation` | challenge republished, validation requested again, wait resumed |
+| `cancelled` / `revoked` / `expired` / gone | dropped, key removed, normal issuance proceeds |
+
+The daily cron therefore self-heals: a run that times out costs nothing, and the next one installs the
+certificate. Nothing is ever requested twice, so no extra slot is burned. Verified live on 2026-09-01 by
+`kill -9` mid-wait — the next run resumed the same id, installed it, and `openssl` confirmed the installed
+certificate matches the key kept by the interrupted run.
+
+`waitCertAttempts` is 30 (15 minutes), which is now a comfort setting rather than a correctness one.
 
 ### Parameters and values
 

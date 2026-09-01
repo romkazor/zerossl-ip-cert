@@ -158,3 +158,98 @@ func TestErrCertGoneIsIdentifiable(t *testing.T) {
 		t.Fatal("an unrelated error matched errCertGone")
 	}
 }
+
+// withTempState points the package globals at a throwaway data dir.
+func withTempState(t *testing.T) string {
+	t.Helper()
+	dir_ := t.TempDir()
+	savedConf_, savedData_, savedPath_ := usingConfig, currentData, currentDataFilePath
+	t.Cleanup(func() {
+		usingConfig, currentData, currentDataFilePath = savedConf_, savedData_, savedPath_
+	})
+	usingConfig = &Config{DataDir: dir_}
+	currentData = &CurrentData{}
+	currentDataFilePath = filepath.Join(dir_, "current.yaml")
+	return dir_
+}
+
+// A certificate that has been requested must survive the run that requested it:
+// its key is kept and its id is written to the state, so a later run can finish it.
+func TestRememberAndClearPending(t *testing.T) {
+	dir_ := withTempState(t)
+	conf_ := &CertConf{ConfID: "c1", CommonName: "203.0.113.10",
+		CertFile: filepath.Join(dir_, "cert.pem"), KeyFile: filepath.Join(dir_, "key.pem")}
+
+	srcKey_ := filepath.Join(dir_, "privkey.pem")
+	if err := os.WriteFile(srcKey_, []byte("KEY"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	rememberPending(conf_, "cert-id-1", srcKey_)
+
+	if got_ := pendingIDFor(conf_); got_ != "cert-id-1" {
+		t.Fatalf("pendingIDFor = %q, want \"cert-id-1\"", got_)
+	}
+	kept_ := pendingKeyPath("cert-id-1")
+	info_, err := os.Stat(kept_)
+	if err != nil {
+		t.Fatalf("kept key missing: %v", err)
+	}
+	if perm_ := info_.Mode().Perm(); perm_ != 0600 {
+		t.Errorf("kept key mode = %v, want 0600", perm_)
+	}
+	// The state entry has to reach disk, otherwise a crash loses the certificate.
+	onDisk_, err := ReadCurrentData(currentDataFilePath)
+	if err != nil {
+		t.Fatalf("ReadCurrentData: %v", err)
+	}
+	if len(onDisk_.Certs) != 1 || onDisk_.Certs[0].PendingCertID != "cert-id-1" {
+		t.Fatalf("state on disk = %+v, want one entry pending cert-id-1", onDisk_.Certs)
+	}
+
+	clearPending(conf_, "cert-id-1")
+	if got_ := pendingIDFor(conf_); got_ != "" {
+		t.Errorf("pendingIDFor after clear = %q, want empty", got_)
+	}
+	if _, err := os.Stat(kept_); !os.IsNotExist(err) {
+		t.Errorf("kept key still present after clear: %v", err)
+	}
+}
+
+// Remembering must not create a second entry for a config that already has one.
+func TestSetPendingIDUpdatesExistingEntry(t *testing.T) {
+	withTempState(t)
+	currentData.Certs = []CurrentCertData{{ConfID: "c1", CertID: "live-id"}}
+	conf_ := &CertConf{ConfID: "c1", CommonName: "203.0.113.10"}
+
+	setPendingID(conf_, "new-id")
+
+	if len(currentData.Certs) != 1 {
+		t.Fatalf("entries = %d, want 1: %+v", len(currentData.Certs), currentData.Certs)
+	}
+	if currentData.Certs[0].CertID != "live-id" {
+		t.Errorf("installed cert id was overwritten: %+v", currentData.Certs[0])
+	}
+	if currentData.Certs[0].PendingCertID != "new-id" {
+		t.Errorf("PendingCertID = %q, want \"new-id\"", currentData.Certs[0].PendingCertID)
+	}
+}
+
+// pendingCertId must not appear in a state file that has nothing pending, so files
+// written by older versions round-trip unchanged.
+func TestPendingIDOmittedWhenEmpty(t *testing.T) {
+	dir_ := withTempState(t)
+	path_ := filepath.Join(dir_, "out.yaml")
+	if err := WriteCurrentData(path_, &CurrentData{Certs: []CurrentCertData{
+		{CommonName: "203.0.113.10", ConfID: "c1", CertID: "abc"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	out_, err := os.ReadFile(path_)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out_), "pendingCertId") {
+		t.Errorf("empty pending id was written out:\n%s", out_)
+	}
+}

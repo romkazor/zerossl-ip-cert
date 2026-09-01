@@ -211,6 +211,170 @@ func issueCert(conf *CertConf) (err error) {
 	return
 }
 
+// pendingDir holds the private key of a certificate that has been requested but is
+// not installed yet. Without the key a certificate ZeroSSL issues later is dead
+// weight -- it cannot be installed and it occupies an account slot for good.
+func pendingDir() string { return filepath.Join(usingConfig.DataDir, "pending") }
+
+func pendingKeyPath(certID string) string {
+	return filepath.Join(pendingDir(), certID+".pem")
+}
+
+// persistState writes current.yaml, logging rather than failing: the caller is
+// always in the middle of something more important.
+func persistState() {
+	if err_ := WriteCurrentData(currentDataFilePath, currentData); err_ != nil {
+		log.Printf("Failed to write current data: %v\n", err_)
+	}
+}
+
+// setPendingID records certID as this config's in-flight certificate, creating the
+// state entry if the config has none yet (a first issue).
+func setPendingID(conf *CertConf, certID string) {
+	for i := range currentData.Certs {
+		if currentData.Certs[i].ConfID == conf.ConfID {
+			currentData.Certs[i].PendingCertID = certID
+			persistState()
+			return
+		}
+	}
+	currentData.Certs = append(currentData.Certs, CurrentCertData{
+		CommonName:    conf.CommonName,
+		ConfID:        conf.ConfID,
+		CertFile:      conf.CertFile,
+		KeyFile:       conf.KeyFile,
+		PendingCertID: certID,
+	})
+	persistState()
+}
+
+func pendingIDFor(conf *CertConf) string {
+	for _, c_ := range currentData.Certs {
+		if c_.ConfID == conf.ConfID {
+			return c_.PendingCertID
+		}
+	}
+	return ""
+}
+
+// rememberPending keeps the private key of a freshly requested certificate and
+// notes its id, so that giving up on the wait costs nothing.
+func rememberPending(conf *CertConf, certID, privKeyPath string) {
+	if err_ := CopyFile(privKeyPath, pendingKeyPath(certID), 0600); err_ != nil {
+		log.Printf("could not keep the private key of pending cert %v: %v\n", certID, err_)
+		return
+	}
+	setPendingID(conf, certID)
+}
+
+// clearPending forgets an in-flight certificate and shreds the key copy kept for it.
+func clearPending(conf *CertConf, certID string) {
+	if err_ := os.Remove(pendingKeyPath(certID)); err_ != nil && !os.IsNotExist(err_) {
+		log.Printf("could not remove the kept key for %v: %v\n", certID, err_)
+	}
+	for i := range currentData.Certs {
+		if currentData.Certs[i].ConfID == conf.ConfID && currentData.Certs[i].PendingCertID != "" {
+			currentData.Certs[i].PendingCertID = ""
+			persistState()
+			return
+		}
+	}
+}
+
+// publishChallenge makes the validation file reachable, either through the external
+// hook or through the built-in server. The returned stop function is always safe to
+// call.
+func publishChallenge(conf *CertConf, certInfo *zerosslIPCert.CertificateInfoModel) (stop func(), err error) {
+	if conf.VerifyHook != "" {
+		return func() {}, runVerifyHook(conf.VerifyHook, certInfo)
+	}
+	stop, err = startValidationServer(certInfo, conf.VerifyListen)
+	if stop == nil {
+		stop = func() {}
+	}
+	return stop, err
+}
+
+// installCert downloads an issued certificate and puts it in place beside the key it
+// was requested with, then runs the post hook. privKeyPath is passed in because the
+// resume path installs a certificate whose key came from an earlier run.
+func installCert(conf *CertConf, client *zerosslIPCert.Client,
+	certInfo *zerosslIPCert.CertificateInfoModel, privKeyPath, tempCertPath string) error {
+	cert_, err_ := client.DownloadCertInline(certInfo.ID, "1")
+	if err_ != nil {
+		return err_
+	}
+	log.Printf("downloaded cert and ca bundle for %v\n", conf.CommonName)
+	fullChainPem_ := fmt.Sprintf("%s\n%s\n",
+		strings.TrimSpace(cert_.Certificate), strings.TrimSpace(cert_.CaBundle))
+	if err_ = os.WriteFile(tempCertPath, []byte(fullChainPem_), 0600); err_ != nil {
+		return err_
+	}
+	if err_ = CopyFile(tempCertPath, conf.CertFile, 0644); err_ != nil {
+		return err_
+	}
+	if err_ = CopyFile(privKeyPath, conf.KeyFile, 0600); err_ != nil {
+		return err_
+	}
+	return runPostHook(conf)
+}
+
+// resumePendingCert finishes a certificate an earlier run requested but never
+// installed. It reports the certificate id when it managed to install one.
+//
+// This is what makes an unlucky wait harmless: the daily run that times out leaves
+// the certificate and its key behind, and the next run either installs it straight
+// away or asks for validation once more. Nothing is requested twice, so no extra
+// account slot is burned.
+func resumePendingCert(conf *CertConf, tempCertPath string) (certID string, resumed bool) {
+	pendingID_ := pendingIDFor(conf)
+	if pendingID_ == "" {
+		return "", false
+	}
+	keyPath_ := pendingKeyPath(pendingID_)
+	if !fileExistsAndIsFile(keyPath_) {
+		log.Printf("pending cert %v has no kept private key, dropping it\n", pendingID_)
+		clearPending(conf, pendingID_)
+		return "", false
+	}
+	client_ := apiClient(conf.ApiKey)
+	certInfo_, err_ := client_.GetCert(pendingID_)
+	if err_ != nil {
+		log.Printf("pending cert %v cannot be read back, dropping it: %v\n", pendingID_, err_)
+		clearPending(conf, pendingID_)
+		return "", false
+	}
+	switch certInfo_.Status {
+	case zerosslIPCert.CertStatus.Issued:
+		log.Printf("pending cert %v is issued, installing it\n", pendingID_)
+	case zerosslIPCert.CertStatus.Draft, zerosslIPCert.CertStatus.PendingValidation:
+		log.Printf("pending cert %v is %v, republishing the challenge and asking again\n",
+			pendingID_, certInfo_.Status)
+		stop_, pubErr_ := publishChallenge(conf, &certInfo_)
+		defer stop_()
+		if pubErr_ != nil {
+			log.Printf("could not republish the challenge for %v: %v\n", pendingID_, pubErr_)
+			return "", false
+		}
+		if err_ = verifyHttpCsrHash(client_, &certInfo_); err_ != nil {
+			// Deliberately keeps the pending entry: the next run tries again.
+			log.Printf("pending cert %v is still not issued: %v\n", pendingID_, err_)
+			return "", false
+		}
+	default:
+		// cancelled, revoked or expired -- nothing left to finish.
+		log.Printf("pending cert %v is %v, dropping it\n", pendingID_, certInfo_.Status)
+		clearPending(conf, pendingID_)
+		return "", false
+	}
+	if err_ = installCert(conf, client_, &certInfo_, keyPath_, tempCertPath); err_ != nil {
+		log.Printf("failed to install pending cert %v: %v\n", pendingID_, err_)
+		return "", false
+	}
+	clearPending(conf, pendingID_)
+	return pendingID_, true
+}
+
 // issueCertImpl issues a cert for conf. replacementFor is the hash of the
 // certificate being renewed, or "" for a fresh issue.
 func issueCertImpl(conf *CertConf, replacementFor string) (certID string, err error) {
@@ -234,6 +398,11 @@ func issueCertImpl(conf *CertConf, replacementFor string) (certID string, err er
 			log.Printf("failed to clean temp dir %v: %v\n", tempDir_, rmErr_)
 		}
 	}()
+	// Finish an earlier attempt before starting another one, or the abandoned
+	// certificate keeps its account slot and a fresh one is requested on top.
+	if certID, resumed_ := resumePendingCert(conf, tempCertPath_); resumed_ {
+		return certID, nil
+	}
 	client_ := apiClient(conf.ApiKey)
 	// Generate PrivateKey.
 	log.Printf("Generating private key for %v\n", conf.CommonName)
@@ -274,58 +443,27 @@ func issueCertImpl(conf *CertConf, replacementFor string) (certID string, err er
 		return
 	}
 	log.Printf("cert info: %+v\n", certInfo_)
+	// From here on the certificate exists on the account, so it must be recoverable
+	// even if this run does not get to install it.
+	rememberPending(conf, certInfo_.ID, tempPrivKeyPath_)
 	// Either the external hook rearranges someone else's web server, or we serve
 	// the challenge ourselves. The hook keeps priority when it is configured.
-	if conf.VerifyHook != "" {
-		if err = runVerifyHook(conf.VerifyHook, &certInfo_); err != nil {
-			log.Println(err)
-			return
-		}
-	} else {
-		var stopServer_ func()
-		if stopServer_, err = startValidationServer(&certInfo_, conf.VerifyListen); err != nil {
-			log.Println(err)
-			return
-		}
-		defer stopServer_()
+	var stopServer_ func()
+	if stopServer_, err = publishChallenge(conf, &certInfo_); err != nil {
+		log.Println(err)
+		return
 	}
+	defer stopServer_()
 	// Verify Domains.
 	if err = verifyHttpCsrHash(client_, &certInfo_); err != nil {
 		log.Printf("verifying error: %v\n", err)
 		return
 	}
-	// Download cert.
-	cert_, err := client_.DownloadCertInline(certInfo_.ID, "1")
-	if err != nil {
+	if err = installCert(conf, client_, &certInfo_, tempPrivKeyPath_, tempCertPath_); err != nil {
 		log.Println(err)
 		return
 	}
-	log.Printf("downloaded cert and ca bundle for %v\n", conf.CommonName)
-	fullChainPem_ := fmt.Sprintf("%s\n%s\n", strings.TrimSpace(cert_.Certificate), strings.TrimSpace(cert_.CaBundle))
-	// Write cert to file.
-	file_, err := os.Create(tempCertPath_)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-	_, err = file_.WriteString(fullChainPem_)
-	if err != nil {
-		return
-	}
-	// Copy cert files to dest.
-	if err = CopyFile(tempCertPath_, conf.CertFile, 0644); err != nil {
-		log.Println(err)
-		return
-	}
-	if err = CopyFile(tempPrivKeyPath_, conf.KeyFile, 0600); err != nil {
-		log.Println(err)
-		return
-	}
-	// Run post hook.
-	if err = runPostHook(conf); err != nil {
-		log.Println(err)
-		return
-	}
+	clearPending(conf, certInfo_.ID)
 	certID = certInfo_.ID
 	return
 }

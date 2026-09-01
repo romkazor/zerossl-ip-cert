@@ -108,6 +108,13 @@ type CurrentCertData struct {
 	CertID     string `yaml:"certId"`
 	CertFile   string `yaml:"certFile"`
 	KeyFile    string `yaml:"keyFile"`
+	// PendingCertID is a certificate that has been requested but not installed yet.
+	// ZeroSSL can take far longer to issue than one run is willing to wait, and a
+	// certificate abandoned mid-flight still occupies an account slot forever. The
+	// id is kept, together with its private key under {dataDir}/pending, so a later
+	// run can finish the job instead of starting another one. Empty in the normal
+	// case, and omitted from the file so old state files stay byte-identical.
+	PendingCertID string `yaml:"pendingCertId,omitempty"`
 }
 
 // ReadCurrentData reads the current data file and returns a CurrentData struct.
