@@ -283,8 +283,8 @@ reject every perfectly normal verification response. Any future `success` check 
 | `download/return` on a draft | `code 2832`, `certificate_not_issued` |
 | Full issue → `revoke(Superseded)` | status becomes `revoked`; the quota slot is **not** released — see the correction below |
 | `POST /certificates` at the cap, plain | `code 2817`, `certificate_limit_reached` — no draft is created |
-| `POST /certificates` at the cap, with `replacement_for_certificate` | **accepted**, draft created — the limit is not checked here |
-| that same draft, challenge served `200`/no redirects | never leaves `pending_validation` (11 min observed, ~2 min is normal) |
+| `POST /certificates` at the cap, with `replacement_for_certificate` | **accepted and issued** — the limit does not apply to renewal |
+| time from challenge published to `issued` | 90 s twice, over 11 min once — latency varies widely |
 | `POST /certificates` for an IP that already has a live cert on **another** account | `code 2839`, `duplicate_certificates_found`; `strict_domains: 0` does not lift it |
 | `GET /certificates/{id}` for another account's certificate | `code 2801`, `permission_denied` |
 | `search=203.0.113` | returns `203.0.113.10` — search matches substrings |
@@ -312,67 +312,80 @@ The **renewal chain** was driven end to end by the tool itself on an isolated co
 | the whole `renewCert` order works (issue → install → write state → revoke) | ran clean, state ended up pointing at the new id |
 | a 4th certificate could still be created while 3 were occupied | it could, so the cap is not enforced exactly where the account page counts |
 
-### Correction (2026-09-01): revoking does NOT free a quota slot
+### What the free allowance actually does (2026-09-01, corrected twice)
 
-An earlier revision of this file claimed it did, and that claim was load-bearing for the entire
-"free renewal is indefinite" story. **It was wrong.** How it was mis-verified is worth recording, because the
-same trap is easy to walk into again: the check counted
+This section was rewritten twice in one day because two earlier readings were wrong. Both mistakes are kept
+below, because each one is easy to make again.
+
+**Mistake 1 — "revoking frees a slot."** It does not. The check that "proved" it counted
 `certificate_status=draft,pending_validation,issued,expired` before and after a revoke and watched it go
-2 → 1. That status list **does not contain `revoked`**, so a revoked certificate leaves the result set by
-definition. The measurement was a tautology dressed up as evidence — it never touched ZeroSSL's own counter.
-
-What the account actually reports, holding 1 `issued`, 3 `revoked`, 4 `cancelled` and nothing else:
+2 → 1. That status list **does not contain `revoked`**, so the certificate left the result set by
+definition. A tautology, not a measurement. What the account really reports, holding 1 `issued`,
+3 `revoked` and 4 `cancelled`:
 
 ```
 account page:  4 / 3  90-Day Certificates      →  4 = issued(1) + revoked(3); cancelled excluded
-POST /certificates  →  {"success":false,"error":{"code":2817,"type":"certificate_limit_reached"}}
 ```
 
-So a **`revoked` certificate keeps occupying its slot**, exactly like an `issued` one, and the account is
-hard blocked from creating anything at all. Only `cancelled` is free of charge, and cancelling requires a
-certificate that was never issued in the first place.
+So a `revoked` certificate keeps its slot exactly like an `issued` one, and only `cancelled` is free of
+charge. That much stands. `QuotaStatuses` in `zerossl_client.go` encodes the counting statuses so the same
+query is never written by hand again.
 
-That makes the upstream README warning — "free account can't renew certificate infinitely" — **accurate**,
-and the note that used to call it stale wrong.
+**Mistake 2 — "so a free account cannot renew."** Also wrong, and it followed from testing the wrong verb.
+A plain create past the limit is refused:
 
-**Still unknown:** whether a slot is ever released, and when. Every certificate on the account was created on
-the same day, so there is no observation of what happens at a certificate's original expiry. Two models fit
-the evidence equally well:
+```
+POST /certificates                          →  {"code":2817,"type":"certificate_limit_reached"}
+```
 
-| Model | Consequence |
+But a create carrying **`replacement_for_certificate`** is accepted *and issued*, on the very same account —
+verified twice, at 4 and then 5 slots used against an allowance of 3, each time reaching `issued` with a
+normal expiry date. The limit applies to **first-time issuance, not to renewal.**
+
+That is the whole picture, and it is good news:
+
+| Operation | Past the allowance |
 |---|---|
-| the slot is held until the certificate's original `expires`, revoked or not | slots come back at that date, and a renewal needing 2 of 3 works |
-| the slot is never released except by cancelling a draft | a free account allows 3 issuances **ever**, and renewal is impossible by design |
+| first issue of a new certificate | refused, `2817` |
+| renewal (`replacement_for_certificate` set, certificate owned by the account) | **goes through** |
 
-Do not write either down as fact until one is actually observed. The operational conclusion is the same
-either way: **never spend slots on live experiments against an account that carries production.**
+Since `renewCert` always sends `replacement_for_certificate` for an `issued`/`expiring_soon` certificate,
+**renewal on a free account keeps working indefinitely.** The upstream README warning applies to fresh
+issuance only. `revokeOldOnRenew` therefore buys no quota — it is a security setting, and a good one, but
+nothing depends on it.
 
-### Where the limit actually bites, and the wall next to it (2026-09-01)
+Still unobserved: whether a slot is ever released at a certificate's original expiry. Every certificate on
+the account was created the same day. Worth a look after 2026-11-30, though it no longer blocks anything.
 
-Two behaviours found by running the tool against a capped account, both of which change how a failure looks:
+### The duplicate wall, which does block things
 
-**The allowance is enforced at issuance, not at creation.** A create carrying
-`replacement_for_certificate` is accepted on an account already over its limit — the draft appears, the
-challenge is published, `VerifyDomains` is accepted — and then the certificate simply never becomes
-`issued`. Observed stuck in `pending_validation` for eleven minutes with the challenge answering `200` and
-no redirects, against roughly two minutes on a healthy account. A plain create on the same account is
-refused outright with `2817`.
+`POST /certificates` for an identifier that already has a live certificate answers:
 
-This is almost certainly the shape of the June 2026 production failure, and it is why `waitCert2BReady` now
-reports the status it got stuck in plus `Client.CountOccupiedSlots()`: a bare "timeout of waiting cert to be
-ready" points nowhere near the cause.
+```
+{"code":2839,"type":"duplicate_certificates_found"}
+```
 
-**An identifier that already has a live certificate cannot get another one, on any account.**
-`POST /certificates` for `<ip>` answers `2839 duplicate_certificates_found` while a valid certificate for
-that `<ip>` exists — including one held by a *different* ZeroSSL account. `strictDomains: 0` does not lift
-it, and the same account creates certificates for unrelated identifiers without complaint. Only a create
-declared as a replacement of a certificate **the account itself owns** gets through.
+This is **not scoped to the account**. A brand new account with zero certificates gets it for an IP whose
+live certificate belongs to somebody else, while the same account creates certificates for unrelated
+identifiers without complaint. `strictDomains: 0` does not lift it. Only a create declared as the
+replacement of a certificate **the account itself owns** gets through — and that cannot cross accounts,
+since `GET /certificates/{id}` on a foreign certificate is `2801 permission_denied`.
 
-The practical consequence: **moving a certificate to a fresh account is not a simple key swap.** The old
-certificate has to be out of the way first, and neither route is clean — revoking it is irreversible and it
-is unverified whether that even lifts `2839`, while waiting for expiry means a scheduled gap. Plan the move
-around this, or move off ZeroSSL: Let's Encrypt issues IP certificates under its `shortlived` profile
-(`Identifier Types: DNS, IP`, 160 hours), where neither the allowance nor the duplicate wall exists.
+The consequence: **moving a certificate to a different ZeroSSL account is not a key swap.** The old
+certificate has to be gone first, and neither route is clean — revoking it is irreversible and it is
+unverified whether that even lifts `2839`, while waiting for expiry means a scheduled gap. Given that
+renewal on the existing account works indefinitely, the honest answer is usually *do not move accounts*.
+
+### Issuance latency
+
+Measured on one host with an identical challenge, minutes apart: **90 seconds** twice, and **over 11
+minutes** once. `waitCert2BReady` used to give up after 5 minutes, report a timeout, and abandon a
+certificate that was on its way to being issued — which then sat there occupying a slot. The bound is now
+`waitCertAttempts = 30` (15 minutes), and each poll is logged instead of the tool going quiet.
+
+This is the most likely shape of the June 2026 production failure, and it is a reminder that a stuck
+`pending_validation` says nothing about its own cause. `accountHint` appends the slot count to the timeout
+as context only — never read it as the diagnosis.
 
 ### Parameters and values
 
@@ -400,11 +413,11 @@ around this, or move off ZeroSSL: Let's Encrypt issues IP certificates under its
 - `cancel` works **only** for `draft`/`pending_validation`. `revoke` works **only** for `issued`.
   **An `expired` certificate can be neither cancelled nor revoked.**
 - **`revoked` counts as well.** Verified 2026-09-01: an account holding 1 `issued` + 3 `revoked` reports
-  `4 / 3` and rejects `POST /certificates` with `code 2817, certificate_limit_reached` (§5). Revoking buys
-  back nothing.
-- Hence the upstream README warning — "ZeroSSL removed the `Delete Certificate` API endpoint, free account
-  can't renew certificate infinitely" — **is accurate**. An earlier revision of this file called that
-  conclusion stale; that was the mistake corrected in §5.
+  `4 / 3`, and a plain `POST /certificates` is refused with `code 2817, certificate_limit_reached` (§5).
+  Revoking buys no quota back.
+- **But the limit does not apply to renewal.** A create carrying `replacement_for_certificate` is issued on
+  the same over-limit account (§5, verified twice). So the upstream README warning — "free account can't
+  renew certificate infinitely" — holds for **first-time issuance only**; renewal keeps working.
 
 ### Implemented strategy
 
@@ -426,10 +439,9 @@ cancelled before issuing (`cleanUnfinished: true`).
 staying valid once the host no longer serves it. That is reason enough to leave it on, but it neither helps
 nor hurts the certificate count.
 
-Quota has to be planned elsewhere: keep **one** certificate per free account under management, never issue
-test certificates on an account that carries production, and treat the 3-certificate allowance as the hard
-ceiling it is. If the account does fill up, the only remedies are upgrading the plan or moving to a different
-account — there is no API call that buys a slot back.
+What the allowance does constrain is **first-time issuance**, so keep one certificate per free account under
+management and never issue test certificates on an account that carries production — a filled account can no
+longer take on anything new, and nothing buys a slot back. An account that is already renewing is fine.
 
 ### Limits specific to IP certificates
 

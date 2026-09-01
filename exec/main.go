@@ -417,25 +417,30 @@ func runVerifyHook(executable string, cerInfo *zerosslIPCert.CertificateInfoMode
 // waitCert2BReady waits for the cert to be ready.
 const (
 	// waitCertAttempts and waitCertInterval bound the wait for ZeroSSL to issue a
-	// certificate whose challenge has already been published. Issuance normally
-	// takes around two minutes.
-	waitCertAttempts = 10
+	// certificate whose challenge has already been published.
+	//
+	// Issuance latency varies a lot: measured at roughly 90 seconds on two runs and
+	// at over 11 minutes on another, same host, same challenge, minutes apart. The
+	// previous bound was 10 attempts, so it gave up after 5 minutes and reported a
+	// timeout for a certificate that was on its way to being issued -- and the run
+	// then abandoned a perfectly good certificate that keeps occupying a slot. 15
+	// minutes covers everything observed with room to spare; the cost of waiting
+	// longer is only a slower failure on a genuinely stuck certificate.
+	waitCertAttempts = 30
 	waitCertInterval = 30 * time.Second
 )
 
 // waitCert2BReady polls until the certificate reaches status issued.
 //
-// A certificate that sits in draft or pending_validation while its challenge file
-// is being served correctly usually means the account is out of certificate slots:
-// ZeroSSL accepts the create call and the validation request, and then simply never
-// issues. Confirmed on 2026-09-01 -- a create that ZeroSSL had accepted stayed in
-// pending_validation for eleven minutes on an account at its limit, against roughly
-// two minutes on a healthy one.
+// It used to fail with a bare "timeout of waiting cert to be ready", which says
+// nothing about what went wrong and sent an earlier investigation down the wrong
+// path entirely. The wait now logs its progress instead of going silent, and the
+// failure names the status it got stuck in along with the account's slot usage.
 //
-// That case used to surface as a bare "timeout of waiting cert to be ready", which
-// says nothing about the cause and sent an earlier investigation down the wrong
-// path entirely. The failure now names the status it got stuck in and how many
-// slots the account has occupied.
+// Take care reading that number: it is context, not a diagnosis. A create carrying
+// replacement_for_certificate is issued even on an account well past its allowance
+// (verified 2026-09-01 at 4 and 5 slots used of 3), so a high count on a renewal is
+// not on its own the reason a certificate is stuck.
 func waitCert2BReady(client *zerosslIPCert.Client, certInfo *zerosslIPCert.CertificateInfoModel) error {
 	status_ := certInfo.Status
 	for i := 0; i < waitCertAttempts; i++ {
@@ -454,20 +459,20 @@ func waitCert2BReady(client *zerosslIPCert.Client, certInfo *zerosslIPCert.Certi
 		time.Sleep(waitCertInterval)
 	}
 	return fmt.Errorf("timeout waiting for cert %v to be issued: still %v after %v%v",
-		certInfo.ID, status_, time.Duration(waitCertAttempts)*waitCertInterval, quotaHint(client))
+		certInfo.ID, status_, time.Duration(waitCertAttempts)*waitCertInterval, accountHint(client))
 }
 
-// quotaHint describes the account's slot usage for an error message. A diagnostic
+// accountHint describes the account's slot usage for an error message. A diagnostic
 // must never become a second failure, so anything that goes wrong here yields an
 // empty string and the original error stands on its own.
-func quotaHint(client *zerosslIPCert.Client) string {
+func accountHint(client *zerosslIPCert.Client) string {
 	used_, err_ := client.CountOccupiedSlots()
 	if err_ != nil {
 		return ""
 	}
 	return fmt.Sprintf(". The account has %v certificate(s) occupying a slot"+
 		" (draft, pending_validation, issued, revoked or expired); the free plan allows 3."+
-		" At the limit ZeroSSL accepts the request and never issues", used_)
+		" A first-time issue is refused past that limit, a renewal is not", used_)
 }
 
 func runPostHook(certConf *CertConf) (err error) {

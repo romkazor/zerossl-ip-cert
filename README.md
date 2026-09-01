@@ -7,12 +7,17 @@ ZeroSSL removed the `Delete Certificate` API endpoint, and on a free account eve
 certificate can be neither cancelled nor revoked, so it holds its slot forever.
 
 A `revoked` certificate counts too: an account holding 1 `issued` and 3 `revoked` reports `4 / 3` and
-rejects any new certificate with `certificate_limit_reached`. So **revoking does not buy a slot back**, and a
-free account genuinely cannot renew forever — plan on 3 certificates and no more.
+refuses to issue anything new. **Revoking does not buy a slot back.**
 
-What zerossl-ip-cert does do is stop wasting them: `cleanUnfinished` cancels leftover `draft` and
-`pending_validation` certificates, which are the only ones that can be released, and `revokeOldOnRenew`
-(on by default) makes sure a superseded key stops being valid once the host no longer serves it.
+The limit applies to *first-time* issuance only. A renewal is sent with `replacement_for_certificate`, and
+ZeroSSL issues those even on an account past its allowance — verified against the live API. So renewal on a
+free account keeps working indefinitely; what you cannot do is add a **new** certificate once the account is
+full.
+
+zerossl-ip-cert always marks a renewal as a replacement, so this works out of the box. `cleanUnfinished`
+cancels leftover `draft` and `pending_validation` certificates, the only ones that can be released, and
+`revokeOldOnRenew` (on by default) makes sure a superseded key stops being valid once the host no longer
+serves it — a security measure, not a quota one.
 
 zerossl-ip-cert is a automation tool for issuing ZeroSSL IP certificates.
 
