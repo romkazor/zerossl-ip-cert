@@ -37,8 +37,13 @@ type CertConf struct {
 	KeyCurve         string `yaml:"keyCurve"`
 	SigAlg           string `yaml:"sigAlg"`
 	StrictDomains    int    `yaml:"strictDomains"`
-	VerifyMethod     string `yaml:"verifyMethod"`
-	VerifyHook       string `yaml:"verifyHook"`
+	// RenewBeforeDays is how many days before expiry a renewal starts. Optional,
+	// defaults to DefaultRenewBeforeDays. Raise it when the scheduler runs rarely:
+	// a monthly cron against a 90-day certificate can land exactly on the threshold
+	// and skip the only window it had.
+	RenewBeforeDays int    `yaml:"renewBeforeDays"`
+	VerifyMethod    string `yaml:"verifyMethod"`
+	VerifyHook      string `yaml:"verifyHook"`
 	// VerifyListen overrides the address of the built-in validation server, which
 	// is used only when VerifyHook is empty. Optional, defaults to ":80" because
 	// ZeroSSL only ever connects to port 80.
@@ -62,6 +67,17 @@ type Config struct {
 	// certificate keeps occupying a slot and can no longer be cancelled or revoked.
 	RevokeOldOnRenew *bool      `yaml:"revokeOldOnRenew"`
 	CertConfigs      []CertConf `yaml:"certConfigs"`
+}
+
+// DefaultRenewBeforeDays is the renewal lead time when the config does not set one.
+const DefaultRenewBeforeDays = 29
+
+// RenewLeadDays reports the effective renewal lead time for this cert config.
+func (c *CertConf) RenewLeadDays() int {
+	if c.RenewBeforeDays > 0 {
+		return c.RenewBeforeDays
+	}
+	return DefaultRenewBeforeDays
 }
 
 // ShouldRevokeOldOnRenew reports the effective revoke-on-renew policy.

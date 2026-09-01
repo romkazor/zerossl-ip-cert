@@ -455,25 +455,75 @@ loopRenew:
 		}
 		log.Printf("no config for renewing cert: %v\n", cert.CommonName)
 	}
+	renewUntrackedConfigs()
+}
+
+// renewUntrackedConfigs covers cert configs that have no entry in current.yaml at
+// all -- a lost or truncated state file would otherwise make -renew a silent no-op
+// forever, since renew() only walks the state. The certificate is looked up in the
+// API by common name; nothing is issued from scratch here, that stays a job for a
+// run without -renew.
+func renewUntrackedConfigs() {
+	for _, c := range usingConfig.CertConfigs {
+		tracked_ := false
+		for _, cert := range currentData.Certs {
+			if cert.ConfID == c.ConfID {
+				tracked_ = true
+				break
+			}
+		}
+		if tracked_ {
+			continue
+		}
+		log.Printf("Config %v (%v) has no state entry, looking it up via the API\n", c.ConfID, c.CommonName)
+		resolved_, err := apiClient(c.ApiKey).ResolveIssuedCert(c.CommonName)
+		if err != nil {
+			log.Printf("No issued cert for %v: %v; run without -renew to issue one\n", c.CommonName, err)
+			continue
+		}
+		log.Printf("Adopted cert %v (expires %v) for %v\n", resolved_.ID, resolved_.Expires, c.CommonName)
+		currentData.Certs = append(currentData.Certs, CurrentCertData{
+			CommonName: c.CommonName,
+			ConfID:     c.ConfID,
+			CertID:     resolved_.ID,
+			CertFile:   c.CertFile,
+			KeyFile:    c.KeyFile,
+		})
+		if err := WriteCurrentData(currentDataFilePath, currentData); err != nil {
+			log.Printf("Failed to write current data: %v\n", err)
+		}
+		conf_ := c
+		if err := renewCert(resolved_.ID, &conf_); err != nil {
+			log.Printf("Failed to renew cert for domain %v: %v\n", c.CommonName, err)
+		}
+	}
 }
 
 func renewCert(id string, conf *CertConf) (err error) {
 	log.Printf("Renewing cert %v with config: %v\n", conf.CommonName, conf.ConfID)
 	client_ := apiClient(conf.ApiKey)
+	// stateID_ is what current.yaml holds; id may be re-pointed below, and the
+	// state entry still has to be found by its original value.
+	stateID_ := id
 	certInfo_, err := client_.GetCert(id)
 	if err != nil {
-		log.Printf("Failed to get cert info: %v\n", err)
-		return err
-	}
-	expireTime_, err := time.Parse("2006-01-02 15:04:05", certInfo_.Expires)
-	if err != nil {
-		log.Printf("Failed to convert expiring time: %v\n", err)
-	} else {
-		if certInfo_.Status != zerosslIPCert.CertStatus.ExpiringSoon &&
-			time.Now().Add(time.Hour*24*29).Before(expireTime_) {
-			log.Printf("Cert %v is not due for renewal, skip renewing.\n", conf.CommonName)
-			return nil
+		// The state file can point at a certificate this account cannot see: a
+		// rotated API key, a restored backup, or a state write that failed. The API
+		// is the source of truth, so look the certificate up by name before giving up.
+		log.Printf("Failed to get cert info for %v: %v\n", id, err)
+		log.Printf("Looking up an issued cert for %v via the API\n", conf.CommonName)
+		resolved_, resolveErr_ := client_.ResolveIssuedCert(conf.CommonName)
+		if resolveErr_ != nil {
+			log.Printf("No issued cert for %v either: %v\n", conf.CommonName, resolveErr_)
+			return err
 		}
+		log.Printf("Recovered cert %v (expires %v) for %v\n", resolved_.ID, resolved_.Expires, conf.CommonName)
+		id, certInfo_ = resolved_.ID, resolved_
+	}
+	if skip_ := renewalNotDue(&certInfo_, conf.CommonName, conf.RenewLeadDays()); skip_ {
+		// Keep the state file pointing at whatever the API actually has.
+		persistCertID(stateID_, id, conf)
+		return nil
 	}
 	if usingConfig.CleanUnfinished {
 		if err := client_.CleanUnfinished(); err != nil {
@@ -491,8 +541,8 @@ func renewCert(id string, conf *CertConf) (err error) {
 	if err == nil {
 		log.Printf("Cert for domain %v issued successfully.\n", conf.CommonName)
 		for i, c := range currentData.Certs {
-			// Use original cert ID to match cert.
-			if c.CertID == id {
+			// Use the id current.yaml was keyed by to find the entry.
+			if c.CertID == stateID_ {
 				currentData.Certs[i].ConfID = conf.ConfID
 				currentData.Certs[i].CommonName = conf.CommonName
 				currentData.Certs[i].CertID = certId_
@@ -510,6 +560,62 @@ func renewCert(id string, conf *CertConf) (err error) {
 		}
 	}
 	return
+}
+
+// renewalNotDue reports whether the certificate can be left alone.
+//
+// Only an issued certificate may be skipped. Any other status must be re-issued
+// even when its expiry date is still in the future: a revoked or cancelled
+// certificate keeps its original dates but is dead, and skipping on the date
+// alone would leave a dead certificate installed indefinitely.
+func renewalNotDue(certInfo *zerosslIPCert.CertificateInfoModel, commonName string, leadDays int) bool {
+	switch certInfo.Status {
+	case zerosslIPCert.CertStatus.Issued:
+		// fall through to the expiry check below
+	case zerosslIPCert.CertStatus.ExpiringSoon:
+		log.Printf("Cert %v is expiring soon, renewing.\n", commonName)
+		return false
+	default:
+		log.Printf("Cert %v is in %v status, renewing.\n", commonName, certInfo.Status)
+		return false
+	}
+	expireTime_, err := time.Parse("2006-01-02 15:04:05", certInfo.Expires)
+	if err != nil {
+		log.Printf("Cannot parse expiry %q of cert %v (%v), renewing.\n",
+			certInfo.Expires, commonName, err)
+		return false
+	}
+	if time.Now().Add(time.Hour * 24 * time.Duration(leadDays)).Before(expireTime_) {
+		log.Printf("Cert %v is not due for renewal (lead time %d days), skip renewing.\n",
+			commonName, leadDays)
+		return true
+	}
+	log.Printf("Cert %v expires %v, within the %d day lead time, renewing.\n",
+		commonName, certInfo.Expires, leadDays)
+	return false
+}
+
+// persistCertID rewrites the state entry keyed by stateID when the API turned out
+// to hold a different certificate id, so the next run starts from the truth.
+func persistCertID(stateID, actualID string, conf *CertConf) {
+	if stateID == actualID {
+		return
+	}
+	for i, c := range currentData.Certs {
+		if c.CertID == stateID {
+			currentData.Certs[i].CertID = actualID
+			currentData.Certs[i].ConfID = conf.ConfID
+			currentData.Certs[i].CommonName = conf.CommonName
+			currentData.Certs[i].CertFile = conf.CertFile
+			currentData.Certs[i].KeyFile = conf.KeyFile
+			if err := WriteCurrentData(currentDataFilePath, currentData); err != nil {
+				log.Printf("Failed to write current data: %v\n", err)
+				return
+			}
+			log.Printf("State updated: %v -> %v\n", stateID, actualID)
+			return
+		}
+	}
 }
 
 // revokeSuperseded revokes the certificate that has just been replaced, which

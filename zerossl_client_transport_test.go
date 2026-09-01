@@ -20,6 +20,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -199,4 +200,66 @@ func TestZeroValueClientGetsDefaults(t *testing.T) {
 	if maxRetries_ != DefaultMaxRetries {
 		t.Errorf("maxRetries = %d, want %d", maxRetries_, DefaultMaxRetries)
 	}
+}
+
+// The API's search matches substrings, so ResolveIssuedCert must filter by exact
+// common name and pick the newest certificate.
+func TestResolveIssuedCert(t *testing.T) {
+	srv_ := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"total_count":4,"result_count":4,"results":[
+			{"id":"other","status":"issued","common_name":"203.0.113.1","expires":"2027-01-01 00:00:00"},
+			{"id":"old","status":"issued","common_name":"203.0.113.10","expires":"2026-10-01 00:00:00"},
+			{"id":"new","status":"issued","common_name":"203.0.113.10","expires":"2026-11-30 23:59:59"},
+			{"id":"dead","status":"cancelled","common_name":"203.0.113.10","expires":"2027-06-01 00:00:00"}
+		]}`)
+	}))
+	defer srv_.Close()
+
+	c_ := NewClient("k", 100)
+	// Point the client at the test server by swapping the transport target.
+	c_.HTTPClient = srv_.Client()
+	c_.HTTPClient.Transport = rewriteHost{base: srv_.URL, rt: srv_.Client().Transport}
+
+	got_, err := c_.ResolveIssuedCert("203.0.113.10")
+	if err != nil {
+		t.Fatalf("ResolveIssuedCert: %v", err)
+	}
+	// "other" is a substring match, "dead" is cancelled, "old" expires sooner.
+	if got_.ID != "new" {
+		t.Errorf("resolved %q, want \"new\"", got_.ID)
+	}
+}
+
+func TestResolveIssuedCertNotFound(t *testing.T) {
+	srv_ := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"total_count":0,"result_count":0,"results":[]}`)
+	}))
+	defer srv_.Close()
+
+	c_ := NewClient("k", 100)
+	c_.HTTPClient = srv_.Client()
+	c_.HTTPClient.Transport = rewriteHost{base: srv_.URL, rt: srv_.Client().Transport}
+
+	if _, err := c_.ResolveIssuedCert("1.2.3.4"); err == nil {
+		t.Fatal("err = nil, want a not-found error")
+	}
+}
+
+// rewriteHost redirects api.zerossl.com to the test server.
+type rewriteHost struct {
+	base string
+	rt   http.RoundTripper
+}
+
+func (t rewriteHost) RoundTrip(req *http.Request) (*http.Response, error) {
+	u_, err := url.Parse(t.base)
+	if err != nil {
+		return nil, err
+	}
+	req.URL.Scheme, req.URL.Host = u_.Scheme, u_.Host
+	rt_ := t.rt
+	if rt_ == nil {
+		rt_ = http.DefaultTransport
+	}
+	return rt_.RoundTrip(req)
 }

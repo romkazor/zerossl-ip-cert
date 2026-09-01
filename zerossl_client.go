@@ -350,6 +350,33 @@ func (c *Client) ListCerts(status, search, limit, page string) (listCertsRsp Lis
 // 	return
 // }
 
+// ResolveIssuedCert finds the live certificate for commonName, using the API as
+// the source of truth when current.yaml cannot be trusted -- a rotated API key, a
+// restored backup, or a state file lost after the old certificate was revoked.
+//
+// NOTICE: the API's "search" matches substrings (searching 203.0.113 returns
+// 203.0.113.10), so the common name has to be compared exactly here.
+func (c *Client) ResolveIssuedCert(commonName string) (cert CertificateInfoModel, err error) {
+	rsp_, err := c.ListCerts(CertStatus.Issued, commonName, "100", "1")
+	if err != nil {
+		return CertificateInfoModel{}, err
+	}
+	for _, cand_ := range rsp_.Results {
+		if cand_.CommonName != commonName || cand_.Status != CertStatus.Issued {
+			continue
+		}
+		// Expires is "2006-01-02 15:04:05", which sorts correctly as a string, so
+		// the newest certificate wins when several are issued.
+		if cert.ID == "" || cand_.Expires > cert.Expires {
+			cert = cand_
+		}
+	}
+	if cert.ID == "" {
+		return CertificateInfoModel{}, fmt.Errorf("no issued certificate found for %v", commonName)
+	}
+	return cert, nil
+}
+
 // CleanUnfinished cleans up unfinished certificates.
 func (c *Client) CleanUnfinished() (err error) {
 	log.Println("Cleaning unfinished certificates")
