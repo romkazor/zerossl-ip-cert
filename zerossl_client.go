@@ -19,54 +19,176 @@ package zerosslIPCert
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"golang.org/x/time/rate"
 )
 
+const (
+	// DefaultRPS is the request rate applied when a Client does not set one.
+	DefaultRPS = 5
+	// DefaultTimeout bounds a single API call, including connect and body read.
+	DefaultTimeout = 60 * time.Second
+	// DefaultMaxRetries bounds how often a 429 response is retried.
+	DefaultMaxRetries = 5
+	// maxRetryDelay caps the backoff between two retries.
+	maxRetryDelay = 60 * time.Second
+	// maxErrorBodyLen caps how much of a failing body is quoted in an error.
+	maxErrorBodyLen = 512
+)
+
 // Client is a client for ZeroSSL.
 // Refer: https://zerossl.com/documentation/api
 type Client struct {
-	ApiKey  string // API key
-	limiter *rate.Limiter
-	mu      sync.Mutex
+	ApiKey string // API key
+	// HTTPClient performs the requests. Optional: a client with DefaultTimeout is
+	// installed on first use, so a bare &Client{ApiKey: k} stays usable.
+	HTTPClient *http.Client
+	// MaxRetries bounds 429 retries. Optional, DefaultMaxRetries when zero;
+	// a negative value disables retrying.
+	MaxRetries int
+	limiter    *rate.Limiter
+	mu         sync.Mutex
 }
 
 // NewClient initializes a new ZeroSSL client with rate limiting.
 func NewClient(apiKey string, rps int) *Client {
+	if rps <= 0 {
+		rps = DefaultRPS
+	}
 	return &Client{
-		ApiKey:  apiKey,
-		limiter: rate.NewLimiter(rate.Limit(rps), rps), // rps requests per second
+		ApiKey:     apiKey,
+		HTTPClient: &http.Client{Timeout: DefaultTimeout},
+		MaxRetries: DefaultMaxRetries,
+		limiter:    rate.NewLimiter(rate.Limit(rps), rps), // rps requests per second
 	}
 }
 
-func (c *Client) doRequest(req *http.Request) (*http.Response, error) {
-	// Ensure limiter is initialized to prevent nil pointer dereference
+// deps lazily fills in the optional fields, so that a zero-value Client works.
+func (c *Client) deps() (*rate.Limiter, *http.Client, int) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.limiter == nil {
-		c.limiter = rate.NewLimiter(rate.Limit(5), 5) // Default to 5 rps
+		c.limiter = rate.NewLimiter(rate.Limit(DefaultRPS), DefaultRPS)
 	}
-	c.mu.Unlock()
+	if c.HTTPClient == nil {
+		// Without an explicit timeout a hung API call would block forever.
+		c.HTTPClient = &http.Client{Timeout: DefaultTimeout}
+	}
+	if c.MaxRetries == 0 {
+		c.MaxRetries = DefaultMaxRetries
+	}
+	return c.limiter, c.HTTPClient, c.MaxRetries
+}
 
-	for {
-		if err := c.limiter.Wait(req.Context()); err != nil {
+func (c *Client) doRequest(req *http.Request) (*http.Response, error) {
+	limiter_, httpClient_, maxRetries_ := c.deps()
+
+	for attempt_ := 0; ; attempt_++ {
+		if err := limiter_.Wait(req.Context()); err != nil {
 			return nil, err
 		}
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := httpClient_.Do(req)
 		if err != nil {
 			return nil, err
 		}
-		if resp.StatusCode == 429 {
-			log.Println("Rate limit exceeded, retrying after delay...")
-			time.Sleep(2 * time.Second) // Backoff before retrying
-			continue
+		if resp.StatusCode != http.StatusTooManyRequests {
+			return resp, nil
 		}
-		return resp, nil
+		delay_ := retryDelay(resp, attempt_)
+		resp.Body.Close()
+		if attempt_ >= maxRetries_ {
+			return nil, fmt.Errorf("ZeroSSL API rate limit exceeded, giving up after %d attempts", attempt_+1)
+		}
+		// The body of the previous attempt is already drained, so it has to be
+		// rebuilt before replaying the request.
+		if req.GetBody != nil {
+			if req.Body, err = req.GetBody(); err != nil {
+				return nil, err
+			}
+		}
+		log.Printf("Rate limit exceeded, retrying in %v (attempt %d/%d)\n", delay_, attempt_+1, maxRetries_)
+		select {
+		case <-time.After(delay_):
+		case <-req.Context().Done():
+			return nil, req.Context().Err()
+		}
 	}
+}
+
+// retryDelay honours Retry-After when present, otherwise backs off exponentially.
+func retryDelay(resp *http.Response, attempt int) time.Duration {
+	if v_ := resp.Header.Get("Retry-After"); v_ != "" {
+		if secs_, err := strconv.Atoi(strings.TrimSpace(v_)); err == nil && secs_ >= 0 {
+			return capDelay(time.Duration(secs_) * time.Second)
+		}
+		if when_, err := http.ParseTime(v_); err == nil {
+			return capDelay(time.Until(when_))
+		}
+	}
+	return capDelay(2 * time.Second << uint(attempt))
+}
+
+func capDelay(d time.Duration) time.Duration {
+	if d < time.Second {
+		return time.Second
+	}
+	if d > maxRetryDelay {
+		return maxRetryDelay
+	}
+	return d
+}
+
+// decodeJSON reads resp into out. It turns both HTTP level failures and the
+// application level error object -- which ZeroSSL serves with HTTP 200 -- into
+// a Go error.
+func decodeJSON(resp *http.Response, out interface{}) error {
+	body_, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	// ZeroSSL describes the failure in the body on both paths: a 401 carries the
+	// same {"success":false,"error":{...}} shape as an HTTP 200 rejection, and it
+	// reads far better than a bare status code.
+	if apiErr_ := embeddedError(body_); apiErr_ != nil {
+		return apiErr_
+	}
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("ZeroSSL API returned status code %d: %s",
+			resp.StatusCode, truncateBody(body_))
+	}
+	if out == nil {
+		return nil
+	}
+	return json.Unmarshal(body_, out)
+}
+
+// embeddedError extracts the "error" object ZeroSSL returns alongside HTTP 200.
+func embeddedError(body []byte) *ApiErrorModel {
+	var probe_ struct {
+		Error *ApiErrorModel `json:"error"`
+	}
+	if err := json.Unmarshal(body, &probe_); err != nil {
+		return nil
+	}
+	if probe_.Error == nil || (probe_.Error.Code == 0 && probe_.Error.Type == "") {
+		return nil
+	}
+	return probe_.Error
+}
+
+func truncateBody(body []byte) string {
+	s_ := strings.TrimSpace(string(body))
+	if len(s_) > maxErrorBodyLen {
+		return s_[:maxErrorBodyLen] + "..."
+	}
+	return s_
 }
 
 // GetCert returns a certificate.
@@ -78,50 +200,57 @@ func (c *Client) GetCert(id string) (cert CertificateInfoModel, err error) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode >= 400 {
-		return CertificateInfoModel{}, fmt.Errorf("ZeroSSL API returned status code %d", resp.StatusCode)
-	}
-
-	err = json.NewDecoder(resp.Body).Decode(&cert)
-	if err != nil {
+	if err = decodeJSON(resp, &cert); err != nil {
 		return CertificateInfoModel{}, err
 	}
 	return
 }
 
-// CreateCert creates a certificate with the given parameters.
-func (c *Client) CreateCert(domains, csr, days, isStrictDomains string) (cert CertificateInfoModel, err error) {
-	req := ApiReqFactory.CreateCertificate(c.ApiKey, domains, csr, days, isStrictDomains)
+// CreateCert creates a certificate with the given parameters. replacementFor is
+// the hash of the certificate being renewed and may be empty for a fresh issue.
+func (c *Client) CreateCert(domains, csr, days, isStrictDomains, replacementFor string) (cert CertificateInfoModel, err error) {
+	req := ApiReqFactory.CreateCertificate(c.ApiKey, domains, csr, days, isStrictDomains, replacementFor)
 	resp, err := c.doRequest(req)
 	if err != nil {
 		return CertificateInfoModel{}, err
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode >= 400 {
-		return CertificateInfoModel{}, fmt.Errorf("ZeroSSL API returned status code %d", resp.StatusCode)
-	}
-
-	err = json.NewDecoder(resp.Body).Decode(&cert)
-	if err != nil {
+	if err = decodeJSON(resp, &cert); err != nil {
 		return CertificateInfoModel{}, err
 	}
 	return
 }
 
-// CancelCert cancels a certificate.
+// CancelCert cancels a certificate. Only certificates in draft or
+// pending_validation status can be cancelled.
 func (c *Client) CancelCert(id string) (err error) {
 	req := ApiReqFactory.CancelCertificate(c.ApiKey, id)
+	return c.doActionRequest(req)
+}
+
+// RevokeCert revokes an issued certificate, freeing up the account quota slot it
+// occupies. Only certificates in issued status can be revoked; once a certificate
+// has expired neither cancel nor revoke works on it any more. Pass a reason from
+// RevokeReason, or an empty string for the ZeroSSL default.
+func (c *Client) RevokeCert(id, reason string) (err error) {
+	req := ApiReqFactory.RevokeCertificate(c.ApiKey, id, reason)
+	return c.doActionRequest(req)
+}
+
+// doActionRequest performs a request whose response is a plain acknowledgement.
+func (c *Client) doActionRequest(req *http.Request) (err error) {
 	resp, err := c.doRequest(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("ZeroSSL API returned status code %d", resp.StatusCode)
+	var result_ ActionResultModel
+	if err = decodeJSON(resp, &result_); err != nil {
+		return err
 	}
-	return
+	return result_.Err()
 }
 
 // VerifyDomains verifies domains of specified certificate with given validation info.
@@ -133,12 +262,18 @@ func (c *Client) VerifyDomains(certID, validationMethod, validationEmail string)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode >= 400 {
-		return VerifyDomainsModel{}, fmt.Errorf("ZeroSSL API returned status code %d", resp.StatusCode)
-	}
-
-	err = json.NewDecoder(resp.Body).Decode(&verifyDomainsRsp)
+	// NOTICE: no embedded-error check here. For HTTP_CSR_HASH ZeroSSL always
+	// answers success:false with an error object, so decodeJSON would reject
+	// every perfectly normal verification response.
+	body_, err := io.ReadAll(resp.Body)
 	if err != nil {
+		return VerifyDomainsModel{}, err
+	}
+	if resp.StatusCode >= 400 {
+		return VerifyDomainsModel{}, fmt.Errorf("ZeroSSL API returned status code %d: %s",
+			resp.StatusCode, truncateBody(body_))
+	}
+	if err = json.Unmarshal(body_, &verifyDomainsRsp); err != nil {
 		return VerifyDomainsModel{}, err
 	}
 	return
@@ -153,12 +288,7 @@ func (c *Client) VerificationStatus(certID string) (verificationStatusRsp Verifi
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode >= 400 {
-		return VerificationStatusModel{}, fmt.Errorf("ZeroSSL API returned status code %d", resp.StatusCode)
-	}
-
-	err = json.NewDecoder(resp.Body).Decode(&verificationStatusRsp)
-	if err != nil {
+	if err = decodeJSON(resp, &verificationStatusRsp); err != nil {
 		return VerificationStatusModel{}, err
 	}
 	return
@@ -173,12 +303,7 @@ func (c *Client) DownloadCertInline(certID, includeCrossSigned string) (cert Cer
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode >= 400 {
-		return CertificateContentModel{}, fmt.Errorf("ZeroSSL API returned status code %d", resp.StatusCode)
-	}
-
-	err = json.NewDecoder(resp.Body).Decode(&cert)
-	if err != nil {
+	if err = decodeJSON(resp, &cert); err != nil {
 		return CertificateContentModel{}, err
 	}
 	return
@@ -193,12 +318,7 @@ func (c *Client) ListCerts(status, search, limit, page string) (listCertsRsp Lis
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode >= 400 {
-		return ListCertsModel{}, fmt.Errorf("ZeroSSL API returned status code %d", resp.StatusCode)
-	}
-
-	err = json.NewDecoder(resp.Body).Decode(&listCertsRsp)
-	if err != nil {
+	if err = decodeJSON(resp, &listCertsRsp); err != nil {
 		return ListCertsModel{}, err
 	}
 	return

@@ -22,6 +22,7 @@ var CertStatus = struct {
 	PendingValidation string
 	Issued            string
 	Cancelled         string
+	Revoked           string
 	ExpiringSoon      string
 	Expired           string
 }{
@@ -29,6 +30,7 @@ var CertStatus = struct {
 	PendingValidation: "pending_validation",
 	Issued:            "issued",
 	Cancelled:         "cancelled",
+	Revoked:           "revoked",
 	ExpiringSoon:      "expiring_soon",
 	Expired:           "expired",
 }

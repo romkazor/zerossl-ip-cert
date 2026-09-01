@@ -17,6 +17,8 @@
 package main
 
 import (
+	"sync"
+
 	"crypto/x509/pkix"
 	"flag"
 	"fmt"
@@ -104,6 +106,12 @@ func main() {
 		log.Printf("Current Config File not found: %s", currentDataFilePath)
 		currentData = &CurrentData{}
 	}
+	// The recommended header auth is the default; the deprecated query parameter
+	// is only added back when the config asks for it.
+	zerosslIPCert.UseLegacyQueryAuth = usingConfig.LegacyQueryAuth
+	if usingConfig.LegacyQueryAuth {
+		log.Println("legacy query-parameter authentication is enabled")
+	}
 	if *renewFlag {
 		renew()
 	} else if *cleanupFlag {
@@ -111,6 +119,25 @@ func main() {
 	} else {
 		issueCerts()
 	}
+}
+
+var (
+	clientsMu_ sync.Mutex
+	clients_   = map[string]*zerosslIPCert.Client{}
+)
+
+// apiClient returns the shared client for an API key. Sharing matters: the rate
+// limiter lives on the Client, so a fresh instance per call would not throttle
+// anything.
+func apiClient(apiKey string) *zerosslIPCert.Client {
+	clientsMu_.Lock()
+	defer clientsMu_.Unlock()
+	if c_, ok_ := clients_[apiKey]; ok_ {
+		return c_
+	}
+	c_ := zerosslIPCert.NewClient(apiKey, zerosslIPCert.DefaultRPS)
+	clients_[apiKey] = c_
+	return c_
 }
 
 // issueCerts issues certs referenced in the config file.
@@ -136,13 +163,13 @@ func issueCert(conf *CertConf) (err error) {
 		}
 	}
 	log.Printf("Cert for domain %v does not exist, try issue.\n", conf.CommonName)
-	client_ := &zerosslIPCert.Client{ApiKey: conf.ApiKey}
+	client_ := apiClient(conf.ApiKey)
 	if usingConfig.CleanUnfinished {
 		if err := client_.CleanUnfinished(); err != nil {
 			log.Printf("Failed to clean unfinished issuing certificate: %v\n", err)
 		}
 	}
-	certId_, err := issueCertImpl(conf)
+	certId_, err := issueCertImpl(conf, "")
 	if err == nil {
 		log.Printf("Cert for domain %v issued successfully.\n", conf.CommonName)
 		currentData.Certs = append(currentData.Certs, CurrentCertData{
@@ -159,7 +186,9 @@ func issueCert(conf *CertConf) (err error) {
 	return
 }
 
-func issueCertImpl(conf *CertConf) (certID string, err error) {
+// issueCertImpl issues a cert for conf. replacementFor is the hash of the
+// certificate being renewed, or "" for a fresh issue.
+func issueCertImpl(conf *CertConf, replacementFor string) (certID string, err error) {
 	tempDir_ := filepath.Join(usingConfig.DataDir, "/temp")
 	tempPrivKeyPath_ := filepath.Join(tempDir_, "/privkey.pem")
 	log.Printf("tempPrivKeyPath: %v\n", tempPrivKeyPath_)
@@ -173,7 +202,7 @@ func issueCertImpl(conf *CertConf) (certID string, err error) {
 	if err = CreateDirIfNotExists(tempDir_, os.ModePerm); err != nil {
 		return
 	}
-	client_ := &zerosslIPCert.Client{ApiKey: conf.ApiKey}
+	client_ := apiClient(conf.ApiKey)
 	// Generate PrivateKey.
 	log.Printf("Generating private key for %v\n", conf.CommonName)
 	privKey_ := zerosslIPCert.KeyGeneratorWrapper(conf.KeyType, conf.KeyBits, conf.KeyCurve)
@@ -207,7 +236,7 @@ func issueCertImpl(conf *CertConf) (certID string, err error) {
 	// Create Cert.
 	log.Printf("Creating cert for %v\n", conf.CommonName)
 	certInfo_, err := client_.CreateCert(conf.CommonName, csrStr_, strconv.Itoa(conf.Days),
-		strconv.Itoa(conf.StrictDomains))
+		strconv.Itoa(conf.StrictDomains), replacementFor)
 	if err != nil {
 		log.Println(err)
 		return
@@ -404,7 +433,7 @@ loopRenew:
 
 func renewCert(id string, conf *CertConf) (err error) {
 	log.Printf("Renewing cert %v with config: %v\n", conf.CommonName, conf.ConfID)
-	client_ := &zerosslIPCert.Client{ApiKey: conf.ApiKey}
+	client_ := apiClient(conf.ApiKey)
 	certInfo_, err := client_.GetCert(id)
 	if err != nil {
 		log.Printf("Failed to get cert info: %v\n", err)
@@ -425,7 +454,14 @@ func renewCert(id string, conf *CertConf) (err error) {
 			log.Printf("Failed to clean unfinished issuing certificate: %v\n", err)
 		}
 	}
-	certId_, err := issueCertImpl(conf)
+	// Only reference a certificate ZeroSSL still considers live as the one being
+	// replaced; an expired or cancelled hash would just make the create call fail.
+	replacementFor_ := ""
+	if certInfo_.Status == zerosslIPCert.CertStatus.Issued ||
+		certInfo_.Status == zerosslIPCert.CertStatus.ExpiringSoon {
+		replacementFor_ = id
+	}
+	certId_, err := issueCertImpl(conf, replacementFor_)
 	if err == nil {
 		log.Printf("Cert for domain %v issued successfully.\n", conf.CommonName)
 		for i, c := range currentData.Certs {
@@ -441,9 +477,38 @@ func renewCert(id string, conf *CertConf) (err error) {
 		}
 		if err = WriteCurrentData(currentDataFilePath, currentData); err != nil {
 			log.Printf("Failed to write current data: %v\n", err)
+		} else if usingConfig.ShouldRevokeOldOnRenew() && id != certId_ {
+			// Strictly after the new state is persisted: revoking first would risk
+			// losing track of the certificate that is actually installed.
+			revokeSuperseded(client_, id)
 		}
 	}
 	return
+}
+
+// revokeSuperseded revokes the certificate that has just been replaced, which
+// releases the account quota slot it holds. On a free account draft,
+// pending_validation, issued and expired certificates all count against the
+// 3-certificate quota, and an expired one can neither be cancelled nor revoked --
+// so the old certificate has to be revoked while it is still issued.
+// A failure here is logged but never fails the renewal: the new certificate is
+// already installed at this point.
+func revokeSuperseded(client *zerosslIPCert.Client, id string) {
+	certInfo_, err := client.GetCert(id)
+	if err != nil {
+		log.Printf("Failed to get superseded cert %v: %v\n", id, err)
+		return
+	}
+	if certInfo_.Status != zerosslIPCert.CertStatus.Issued {
+		log.Printf("Superseded cert %v is in %v status, nothing to revoke.\n", id, certInfo_.Status)
+		return
+	}
+	log.Printf("Revoking superseded cert %v to free the account quota slot\n", id)
+	if err = client.RevokeCert(id, zerosslIPCert.RevokeReason.Superseded); err != nil {
+		log.Printf("Failed to revoke superseded cert %v: %v\n", id, err)
+		return
+	}
+	log.Printf("Superseded cert %v revoked\n", id)
 }
 
 // // issueCerts issues certs referenced in the config file.
@@ -473,7 +538,7 @@ func renewCert(id string, conf *CertConf) (err error) {
 func cleanup() {
 	log.Println("will cleanup pending certs")
 	for _, c := range usingConfig.CertConfigs {
-		client_ := &zerosslIPCert.Client{ApiKey: c.ApiKey}
+		client_ := apiClient(c.ApiKey)
 		err := client_.CleanUnfinished()
 		if err != nil {
 			log.Printf("Failed to clean unfinished issuing certificate: %v\n", err)

@@ -26,11 +26,43 @@ import (
 // ApiEndpoint is the zerossl api endpoint.
 const ApiEndpoint = "api.zerossl.com"
 
+// AuthHeaderPrefix is the only prefix ZeroSSL accepts in the Authorization header.
+const AuthHeaderPrefix = "ApiKey "
+
+// UseLegacyQueryAuth additionally sends the access key as the deprecated
+// "access_key" query parameter. The header based authentication is always sent,
+// so this is only needed to talk to a stale API deployment.
+var UseLegacyQueryAuth = false
+
+// setAuth applies authentication to req. The recommended "Authorization: ApiKey <key>"
+// header is always set; the deprecated query parameter is added only in legacy mode.
+// It must be called before q_ is encoded into the URL.
+func setAuth(req *http.Request, q_ url.Values, accessKey string) {
+	if req.Header == nil {
+		req.Header = make(http.Header)
+	}
+	req.Header.Set("Authorization", AuthHeaderPrefix+accessKey)
+	if UseLegacyQueryAuth {
+		q_.Add("access_key", accessKey)
+	}
+}
+
+// newFormBody attaches a urlencoded form body to req, keeping it replayable on retry.
+func newFormBody(req *http.Request, bodyForm_ url.Values) {
+	encoded_ := bodyForm_.Encode()
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.ContentLength = int64(len(encoded_))
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(strings.NewReader(encoded_)), nil
+	}
+	req.Body, _ = req.GetBody()
+}
+
 // ApiReqFactory is a factory for creating API requests.
 var ApiReqFactory = struct {
 	// Request of creating a new certificate.
 	CreateCertificate func(accessKey, certificateDomains, certificateCsr, certificateValidityDays,
-		strictDomains string) (req *http.Request)
+		strictDomains, replacementForCertificate string) (req *http.Request)
 	// Request of listing all certificates.
 	ListCertificates func(accessKey, certificateStatus, search, limit, page string) (req *http.Request)
 	// Request of getting a certificate.
@@ -41,15 +73,17 @@ var ApiReqFactory = struct {
 	VerificationStatus func(accessKey, id string) (req *http.Request)
 	// Request of cancelation a certificate.
 	CancelCertificate func(accessKey, id string) (req *http.Request)
+	// Request of revoking an issued certificate.
+	RevokeCertificate func(accessKey, id, reason string) (req *http.Request)
 	// Request of downloading a certificate.
 	DownloadCertificateInline func(accessKey, certID, includeCrossSigned string) (req *http.Request)
 }{
 	CreateCertificate: func(accessKey, certificateDomains, certificateCsr, certificateValidityDays,
-		strictDomains string) (req *http.Request) {
+		strictDomains, replacementForCertificate string) (req *http.Request) {
 		req = &http.Request{Method: http.MethodPost}
 		url_ := &url.URL{Scheme: "https", Host: ApiEndpoint, Path: "/certificates"}
 		q_ := make(url.Values)
-		q_.Add("access_key", accessKey)
+		setAuth(req, q_, accessKey)
 		url_.RawQuery = q_.Encode()
 		req.URL = url_
 		bodyForm_ := make(url.Values)
@@ -65,10 +99,13 @@ var ApiReqFactory = struct {
 		if strictDomains != "" {
 			bodyForm_.Add("strict_domains", strictDomains)
 		}
+		// Marks the new certificate as the replacement of an existing one, so that
+		// ZeroSSL tracks it as a renewal instead of an unrelated certificate.
+		if replacementForCertificate != "" {
+			bodyForm_.Add("replacement_for_certificate", replacementForCertificate)
+		}
 		if len(bodyForm_) > 0 {
-			req.Header = make(http.Header)
-			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-			req.Body = io.NopCloser(strings.NewReader(bodyForm_.Encode()))
+			newFormBody(req, bodyForm_)
 		}
 		return
 	},
@@ -76,7 +113,7 @@ var ApiReqFactory = struct {
 		req = &http.Request{Method: http.MethodGet}
 		url_ := &url.URL{Scheme: "https", Host: ApiEndpoint, Path: "/certificates"}
 		q_ := make(url.Values)
-		q_.Add("access_key", accessKey)
+		setAuth(req, q_, accessKey)
 		if certificateStatus != "" {
 			q_.Add("certificate_status", certificateStatus)
 		}
@@ -122,7 +159,7 @@ var ApiReqFactory = struct {
 		req = &http.Request{Method: http.MethodGet}
 		url_ := &url.URL{Scheme: "https", Host: ApiEndpoint, Path: "/certificates/" + id}
 		q_ := make(url.Values)
-		q_.Add("access_key", accessKey)
+		setAuth(req, q_, accessKey)
 		url_.RawQuery = q_.Encode()
 		req.URL = url_
 		return
@@ -131,7 +168,7 @@ var ApiReqFactory = struct {
 		req = &http.Request{Method: http.MethodPost}
 		url_ := &url.URL{Scheme: "https", Host: ApiEndpoint, Path: "/certificates/" + certificateId + "/challenges"}
 		q_ := make(url.Values)
-		q_.Add("access_key", accessKey)
+		setAuth(req, q_, accessKey)
 		url_.RawQuery = q_.Encode()
 		req.URL = url_
 		bodyForm_ := make(url.Values)
@@ -142,9 +179,7 @@ var ApiReqFactory = struct {
 			bodyForm_.Add("validation_email", validationEmail)
 		}
 		if len(bodyForm_) > 0 {
-			req.Header = make(http.Header)
-			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-			req.Body = io.NopCloser(strings.NewReader(bodyForm_.Encode()))
+			newFormBody(req, bodyForm_)
 		}
 		return
 	},
@@ -152,7 +187,7 @@ var ApiReqFactory = struct {
 		req = &http.Request{Method: http.MethodGet}
 		url_ := &url.URL{Scheme: "https", Host: ApiEndpoint, Path: "/certificates/" + id + "/status"}
 		q_ := make(url.Values)
-		q_.Add("access_key", accessKey)
+		setAuth(req, q_, accessKey)
 		url_.RawQuery = q_.Encode()
 		req.URL = url_
 		return
@@ -161,16 +196,32 @@ var ApiReqFactory = struct {
 		req = &http.Request{Method: http.MethodPost}
 		url_ := &url.URL{Scheme: "https", Host: ApiEndpoint, Path: "/certificates/" + id + "/cancel"}
 		q_ := make(url.Values)
-		q_.Add("access_key", accessKey)
+		setAuth(req, q_, accessKey)
 		url_.RawQuery = q_.Encode()
 		req.URL = url_
+		return
+	},
+	RevokeCertificate: func(accessKey, id, reason string) (req *http.Request) {
+		req = &http.Request{Method: http.MethodPost}
+		url_ := &url.URL{Scheme: "https", Host: ApiEndpoint, Path: "/certificates/" + id + "/revoke"}
+		q_ := make(url.Values)
+		setAuth(req, q_, accessKey)
+		url_.RawQuery = q_.Encode()
+		req.URL = url_
+		bodyForm_ := make(url.Values)
+		if reason != "" {
+			bodyForm_.Add("reason", reason)
+		}
+		if len(bodyForm_) > 0 {
+			newFormBody(req, bodyForm_)
+		}
 		return
 	},
 	DownloadCertificateInline: func(accessKey, certID, includeCrossSigned string) (req *http.Request) {
 		req = &http.Request{Method: http.MethodGet}
 		url_ := &url.URL{Scheme: "https", Host: ApiEndpoint, Path: "/certificates/" + certID + "/download/return"}
 		q_ := make(url.Values)
-		q_.Add("access_key", accessKey)
+		setAuth(req, q_, accessKey)
 		if includeCrossSigned != "" {
 			q_.Add("include_cross_signed", includeCrossSigned)
 		}

@@ -46,10 +46,24 @@ type CertConf struct {
 }
 
 type Config struct {
-	DataDir         string     `yaml:"dataDir"`
-	LogFile         string     `yaml:"logFile"`
-	CleanUnfinished bool       `yaml:"cleanUnfinished"`
-	CertConfigs     []CertConf `yaml:"certConfigs"`
+	DataDir         string `yaml:"dataDir"`
+	LogFile         string `yaml:"logFile"`
+	CleanUnfinished bool   `yaml:"cleanUnfinished"`
+	// LegacyQueryAuth additionally sends the deprecated "access_key" query
+	// parameter. Optional, defaults to false: the recommended
+	// "Authorization: ApiKey <key>" header is always sent.
+	LegacyQueryAuth bool `yaml:"legacyQueryAuth"`
+	// RevokeOldOnRenew revokes the superseded certificate once the new one is
+	// installed, which frees the account quota slot it holds. Optional pointer:
+	// when omitted it defaults to true, because on a free account an expired
+	// certificate keeps occupying a slot and can no longer be cancelled or revoked.
+	RevokeOldOnRenew *bool      `yaml:"revokeOldOnRenew"`
+	CertConfigs      []CertConf `yaml:"certConfigs"`
+}
+
+// ShouldRevokeOldOnRenew reports the effective revoke-on-renew policy.
+func (c *Config) ShouldRevokeOldOnRenew() bool {
+	return c.RevokeOldOnRenew == nil || *c.RevokeOldOnRenew
 }
 
 // ReadConfig reads the config file and returns a Config struct.

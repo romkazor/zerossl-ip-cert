@@ -1,6 +1,14 @@
 dataDir: /var/local/zerossl # Data directory for containing the status and temporary files
 logFile: /var/local/zerossl/log.txt # Log file
 cleanUnfinished: true # Clean zerossl certificates that are not finished issuing.
+# Revoke the superseded certificate once the new one is installed, freeing the
+# quota slot it holds. Optional, defaults to true. Keep it enabled on a free
+# account: draft, pending_validation, issued and expired certificates all count
+# against the 3-certificate quota, and an expired one can no longer be released.
+revokeOldOnRenew: true
+# Also send the deprecated "access_key" query parameter. Optional, defaults to
+# false. The recommended "Authorization: ApiKey <key>" header is always sent.
+legacyQueryAuth: false
 certConfigs:
   # Use confId to identify the certificate configuration
   - commonName: 4.3.2.1
