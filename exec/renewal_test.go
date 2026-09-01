@@ -20,7 +20,7 @@ import (
 	"testing"
 	"time"
 
-	zerosslIPCert "github.com/tinkernels/zerossl-ip-cert"
+	zerosslIPCert "github.com/romkazor/zerossl-ip-cert/v2"
 )
 
 // ZeroSSL reports Expires in UTC with no zone suffix, and time.Parse reads a

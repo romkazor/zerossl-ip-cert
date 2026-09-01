@@ -27,7 +27,7 @@ import (
 	"strings"
 	"testing"
 
-	zerosslIPCert "github.com/tinkernels/zerossl-ip-cert"
+	zerosslIPCert "github.com/romkazor/zerossl-ip-cert/v2"
 )
 
 func testCertInfo(url string) *zerosslIPCert.CertificateInfoModel {

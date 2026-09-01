@@ -8,12 +8,14 @@ A tool for issuing and auto-renewing **ZeroSSL TLS certificates for IP addresses
 REST API. The ACME path is not used here: ZeroSSL issues IP certificates through the REST API with
 file validation.
 
-- A fork. `origin` → `https://github.com/NyaMisty/zerossl-ip-cert.git`, upstream is `tinkernels/zerossl-ip-cert`.
-- **The module path is still `github.com/tinkernels/zerossl-ip-cert`** and does not match origin. Do not
-  rename it: that would break the library import for existing users.
+- A fork of `NyaMisty/zerossl-ip-cert`, itself a fork of `tinkernels/zerossl-ip-cert`.
+- Module path is **`github.com/romkazor/zerossl-ip-cert/v2`**. The `/v2` suffix is required by Go modules
+  for major version 2 and up, and every import inside the repo carries it. Renaming the module means editing
+  go.mod and every import in `exec/` together.
 - Apache-2.0 licensed; the header is mandatory in every `.go` file.
 - Development branch is `master`. Last substantial upstream change was May 2025 (rate limiting + cancellation
-  of pending certificates).
+  of pending certificates); everything after that is this fork.
+- Version lives in `const Version` in `exec/main.go` and must be bumped together with the git tag.
 
 ## 2. Layout and commands
 
@@ -463,7 +465,7 @@ Breaking changes to the library API (for external importers of the package):
 
 ## 9. What not to do
 
-- Do not change the module path `github.com/tinkernels/zerossl-ip-cert`.
+- Do not drop the `/v2` suffix from the module path while the major version is 2 — `go get` would break.
 - Do not move packages into `cmd/` / `internal/` — the layout stays flat.
 - Do not break the hook env contract (`ZEROSSL_*`) and do not rename existing YAML keys.
 - Do not "fix" the trailing-underscore style.

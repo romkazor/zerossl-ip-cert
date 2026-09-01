@@ -1,4 +1,4 @@
-# zerossl-ip-cert &middot; [![License](https://img.shields.io/hexpm/l/plug?logo=Github&style=flat)](https://github.com/tinkernels/zerossl-ip-cert/blob/master/LICENSE) [![Go Report Card](https://goreportcard.com/badge/github.com/tinkernels/zerossl-ip-cert)](https://goreportcard.com/report/github.com/tinkernels/zerossl-ip-cert) [![Go Reference](https://pkg.go.dev/badge/github.com/tinkernels/zerossl-ip-cert.svg)](https://pkg.go.dev/github.com/tinkernels/zerossl-ip-cert) [![Build workflow](https://github.com/tinkernels/zerossl-ip-cert/actions/workflows/build.yml/badge.svg)](https://github.com/tinkernels/zerossl-ip-cert/actions/workflows/build.yml)
+# zerossl-ip-cert &middot; [![License](https://img.shields.io/hexpm/l/plug?logo=Github&style=flat)](https://github.com/romkazor/zerossl-ip-cert/blob/master/LICENSE) [![Go Report Card](https://goreportcard.com/badge/github.com/romkazor/zerossl-ip-cert)](https://goreportcard.com/report/github.com/romkazor/zerossl-ip-cert) [![Go Reference](https://pkg.go.dev/badge/github.com/romkazor/zerossl-ip-cert.svg)](https://pkg.go.dev/github.com/romkazor/zerossl-ip-cert) [![Build workflow](https://github.com/romkazor/zerossl-ip-cert/actions/workflows/build.yml/badge.svg)](https://github.com/romkazor/zerossl-ip-cert/actions/workflows/build.yml)
 
 ## ⚠️ Note on free accounts
 
@@ -40,8 +40,8 @@ ever revokes an issued certificate.
 ## Installation
 
 * Package zerossl-ip-cert contains ZeroSSL [REST API](https://zerossl.com/documentation/api/) client, one can
-  just `go get github.com/tinkernels/zerossl-ip-cert` and import it to use the client.
-* To build static executables, clone this repository and `make release` , or you can make your desire target binary, just take a look at the [Makefile](https://github.com/tinkernels/zerossl-ip-cert/blob/master/Makefile).
+  just `go get github.com/romkazor/zerossl-ip-cert/v2` and import it to use the client.
+* To build static executables, clone this repository and `make release` , or you can make your desire target binary, just take a look at the [Makefile](https://github.com/romkazor/zerossl-ip-cert/blob/master/Makefile).
 
 ## Usage
 
@@ -65,7 +65,7 @@ With no flag, certificates from the config file are issued (or renewed, if a sta
 
 ### Configuration File
 
-You can find a sample configuration file [here](https://github.com/tinkernels/zerossl-ip-cert/blob/master/exec/sample-config.yaml), with enough comments in it.
+You can find a sample configuration file [here](https://github.com/romkazor/zerossl-ip-cert/blob/master/exec/sample-config.yaml), with enough comments in it.
 
 Two top-level options matter for quota and API compatibility:
 
@@ -83,7 +83,7 @@ And one per certificate entry:
 
 Both are optional; a configuration file written for an earlier version keeps working unchanged.
 
- And also a sample  state record file [here](https://github.com/tinkernels/zerossl-ip-cert/blob/master/exec/sample-current.yaml), just for troubleshooting.
+ And also a sample  state record file [here](https://github.com/romkazor/zerossl-ip-cert/blob/master/exec/sample-current.yaml), just for troubleshooting.
 
 ### External Hook
 
@@ -110,7 +110,7 @@ For the hook route you need a http server running and hook programs to finish th
 
   `ZEROSSL_HTTP_FV_CONTENT` stands for validation content, ZeroSSL will check it when domain verification started.
 
-  And a sample script for nginx can be found [here](https://github.com/tinkernels/zerossl-ip-cert/blob/master/exec/sample-nginx-verify-hook.sh), a sample script for caddy can be found [here](https://github.com/tinkernels/zerossl-ip-cert/blob/master/exec/sample-caddy-verify-hook.cmd).
+  And a sample script for nginx can be found [here](https://github.com/romkazor/zerossl-ip-cert/blob/master/exec/sample-nginx-verify-hook.sh), a sample script for caddy can be found [here](https://github.com/romkazor/zerossl-ip-cert/blob/master/exec/sample-caddy-verify-hook.cmd).
 
   *P.S.* When running in **Windows OS**, text lines are concatenated with spaces in `%ZEROSSL_HTTP_FV_CONTENT%`, as windows doesn't accept multiline variables without using magic.
 
@@ -120,8 +120,8 @@ For the hook route you need a http server running and hook programs to finish th
 
   `ZEROSSL_KEY_FPATH` stands for the store path of private key.
 
-  And a sample script for nginx can be found [here](https://github.com/tinkernels/zerossl-ip-cert/blob/master/exec/sample-nginx-post-hook.sh), a sample script for caddy can be found [here](https://github.com/tinkernels/zerossl-ip-cert/blob/master/exec/sample-caddy-post-hook.cmd).
+  And a sample script for nginx can be found [here](https://github.com/romkazor/zerossl-ip-cert/blob/master/exec/sample-nginx-post-hook.sh), a sample script for caddy can be found [here](https://github.com/romkazor/zerossl-ip-cert/blob/master/exec/sample-caddy-post-hook.cmd).
 
 ## License
 
-[Apache-2.0](https://github.com/tinkernels/zerossl-ip-cert/blob/master/LICENSE)
+[Apache-2.0](https://github.com/romkazor/zerossl-ip-cert/blob/master/LICENSE)

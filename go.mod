@@ -1,4 +1,4 @@
-module github.com/tinkernels/zerossl-ip-cert
+module github.com/romkazor/zerossl-ip-cert/v2
 
 go 1.23.0
 

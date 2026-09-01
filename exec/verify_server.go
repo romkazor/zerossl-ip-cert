@@ -27,7 +27,7 @@ import (
 	"strings"
 	"time"
 
-	zerosslIPCert "github.com/tinkernels/zerossl-ip-cert"
+	zerosslIPCert "github.com/romkazor/zerossl-ip-cert/v2"
 )
 
 // validationFiles maps the URL path of every file validation challenge to the

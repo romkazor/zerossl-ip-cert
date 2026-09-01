@@ -33,11 +33,11 @@ import (
 	"strings"
 	"time"
 
-	zerosslIPCert "github.com/tinkernels/zerossl-ip-cert"
+	zerosslIPCert "github.com/romkazor/zerossl-ip-cert/v2"
 )
 
 // Version is the version of this application.
-const Version = "v1.0.1"
+const Version = "v2.0.0"
 
 var (
 	renewFlag   = flag.Bool("renew", false, "Renew existing certs only")
