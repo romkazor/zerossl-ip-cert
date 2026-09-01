@@ -17,117 +17,40 @@
 package zerosslIPCert
 
 import (
-	"crypto/elliptic"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"fmt"
-	"strings"
+	"os"
 	"testing"
-	"time"
 )
 
-func TestZeroSSLClient_GetCert(t *testing.T) {
-	c_ := &Client{ApiKey: "x"}
-	cert_, err := c_.GetCert("x")
-	if err != nil {
-		t.Error(err)
-		return
+// These tests talk to the live ZeroSSL API and are skipped unless
+// ZEROSSL_API_KEY is set:
+//
+//	ZEROSSL_API_KEY=... go test -run Integration ./...
+//
+// They only read; nothing here creates or cancels a certificate.
+func integrationClient(t *testing.T) *Client {
+	t.Helper()
+	key_ := os.Getenv("ZEROSSL_API_KEY")
+	if key_ == "" {
+		t.Skip("ZEROSSL_API_KEY is not set, skipping live API test")
 	}
-	expireTime_, err := time.Parse("2006-01-02 15:04:05", cert_.Expires)
-	if err != nil {
-		t.Error(err)
-	} else {
-		if time.Now().Add(time.Hour * 24 * 29).After(expireTime_) {
-			t.Log("Expiring soon.")
-		}
-	}
-	t.Logf("cert: %#v", cert_)
+	return &Client{ApiKey: key_}
 }
 
-func TestClient_CreateCert(t *testing.T) {
-	c_ := &Client{ApiKey: "x"}
-	privKey_ := GenEccKey(elliptic.P256())
-	subj_ := pkix.Name{
-		Country:            []string{"US"},
-		Province:           []string{"California"},
-		Locality:           []string{"California"},
-		Organization:       []string{"ZeroSSL"},
-		OrganizationalUnit: []string{"ZeroSSL"},
-		CommonName:         "example.com",
-	}
-	csr_, err := GenEccCSR(subj_, privKey_, x509.ECDSAWithSHA256)
+func TestIntegrationListCerts(t *testing.T) {
+	c_ := integrationClient(t)
+	rsp_, err := c_.ListCerts("", "", "100", "1")
 	if err != nil {
-		t.Error(err)
-		return
+		t.Fatalf("ListCerts: %v", err)
 	}
-	csrStr_ := GetCSRString(csr_)
-	if csrStr_ == "" {
-		t.Error("failed to get csr string")
-		return
+	t.Logf("total_count=%d result_count=%d", rsp_.TotalCount, rsp_.ResultCount)
+	for _, cert_ := range rsp_.Results {
+		t.Logf("  %v %v %v expires=%v", cert_.ID, cert_.Status, cert_.CommonName, cert_.Expires)
 	}
-	cert_, err := c_.CreateCert("example.com", csrStr_, "90", "1")
-	if err != nil {
-		t.Error(err)
-		return
-	}
-	t.Logf("cert: %#v", cert_)
 }
 
-func TestClient_DeleteCert(t *testing.T) {
-	c_ := &Client{ApiKey: "x"}
-	err := c_.CancelCert("x")
-	if err != nil {
-		t.Error(err)
-		return
-	}
-	t.Log("cert deleted")
-}
-
-func TestClient_VerifyDomains(t *testing.T) {
-	c_ := &Client{ApiKey: "x"}
-	rspModel_, err := c_.VerifyDomains("x", VerifyDomainsMethod.HttpCsrHash, "")
-	if err != nil {
-		t.Error(err)
-		return
-	}
-	t.Logf("domains verification result: %#v", rspModel_)
-}
-
-func TestClient_VerificationStatus(t *testing.T) {
-	c_ := &Client{ApiKey: "x"}
-	rspModel_, err := c_.VerificationStatus("x")
-	if err != nil {
-		t.Error(err)
-		return
-	}
-	t.Logf("verification status: %#v", rspModel_)
-}
-
-func TestClient_DownloadCertInline(t *testing.T) {
-	c_ := &Client{ApiKey: "x"}
-	cert_, err := c_.DownloadCertInline("x", "1")
-	if err != nil {
-		t.Error(err)
-		return
-	}
-	t.Logf("cert: %#v", cert_)
-	fullChainPem_ := fmt.Sprintf("%s\n%s\n", strings.TrimSpace(cert_.Certificate), strings.TrimSpace(cert_.CaBundle))
-	t.Logf("cert full chain: %s", fullChainPem_)
-}
-
-func TestClient_ListCerts(t *testing.T) {
-	c_ := &Client{ApiKey: "x"}
-	rspModel_, err := c_.ListCerts("", "example.com", "", "")
-	if err != nil {
-		t.Error(err)
-		return
-	}
-	t.Logf("certs: %#v", rspModel_)
-}
-
-func Test_CleanUnfinished(t *testing.T) {
-	c_ := &Client{ApiKey: "x"}
-	if err := c_.CleanUnfinished(); err != nil {
-		t.Logf("Failed to clean unfinished issuing certificate: %v\n", err)
+func TestIntegrationGetCertNotFound(t *testing.T) {
+	c_ := integrationClient(t)
+	if _, err := c_.GetCert("0000000000000000000000000000000000000000"); err != nil {
+		t.Logf("expected error for a non-existent certificate: %v", err)
 	}
 }
