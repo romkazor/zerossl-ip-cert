@@ -356,8 +356,26 @@ Since `renewCert` always sends `replacement_for_certificate` for an `issued`/`ex
 issuance only. `revokeOldOnRenew` therefore buys no quota — it is a security setting, and a good one, but
 nothing depends on it.
 
-Still unobserved: whether a slot is ever released at a certificate's original expiry. Every certificate on
-the account was created the same day. Worth a look after 2026-11-30, though it no longer blocks anything.
+**A slot is never released.** ZeroSSL's own help centre says so: its worked example has 1 draft + 1 issued
++ 1 expired filling a 3-certificate quota, with cancelling the draft as the only way out, and it states
+that *"regardless of the subscription plan you are using, revoking a certificate will not free up space in
+your quota"* — which is exactly what was measured here before the page was found. Community reports match:
+people hit the limit holding a single active certificate. So `cancel` is the only operation that returns a
+slot, and it only applies to a certificate that was never issued.
+
+This deployment's own history is the same story. The account that failed in June 2026 held `expired`
+certificates and never recovered on its own; had expiry released slots it would have healed within one
+90-day cycle.
+
+Note what that does *not* contradict: the renewal exemption above is a REST API behaviour of
+`replacement_for_certificate`, and ACME clients have no equivalent, which is why forum threads about
+ZeroSSL's quota describe renewal as impossible once three certificates exist. Both are true at once.
+
+One more escape that does not apply here: ZeroSSL's **ACME** endpoint issues unlimited free 90-day
+certificates, unlike the REST API. It cannot be used for this tool's purpose, because IP identifiers
+(RFC 8738) are supported over the **REST API only** — and that is precisely where the 3-certificate cap
+lives. For IP certificates on a free ZeroSSL account there is no way around the cap; only Let's Encrypt's
+`shortlived` profile avoids it.
 
 ### The duplicate wall, which does block things
 
