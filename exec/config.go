@@ -39,9 +39,13 @@ type CertConf struct {
 	StrictDomains    int    `yaml:"strictDomains"`
 	VerifyMethod     string `yaml:"verifyMethod"`
 	VerifyHook       string `yaml:"verifyHook"`
-	PostHook         string `yaml:"postHook"`
-	CertFile         string `yaml:"certFile"`
-	KeyFile          string `yaml:"keyFile"`
+	// VerifyListen overrides the address of the built-in validation server, which
+	// is used only when VerifyHook is empty. Optional, defaults to ":80" because
+	// ZeroSSL only ever connects to port 80.
+	VerifyListen string `yaml:"verifyListen"`
+	PostHook     string `yaml:"postHook"`
+	CertFile     string `yaml:"certFile"`
+	KeyFile      string `yaml:"keyFile"`
 }
 
 type Config struct {

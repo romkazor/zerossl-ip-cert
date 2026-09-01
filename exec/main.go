@@ -256,9 +256,20 @@ func issueCertImpl(conf *CertConf, replacementFor string) (certID string, err er
 		return
 	}
 	log.Printf("cert info: %+v\n", certInfo_)
-	if err = runVerifyHook(conf.VerifyHook, &certInfo_); err != nil {
-		log.Println(err)
-		return
+	// Either the external hook rearranges someone else's web server, or we serve
+	// the challenge ourselves. The hook keeps priority when it is configured.
+	if conf.VerifyHook != "" {
+		if err = runVerifyHook(conf.VerifyHook, &certInfo_); err != nil {
+			log.Println(err)
+			return
+		}
+	} else {
+		var stopServer_ func()
+		if stopServer_, err = startValidationServer(&certInfo_, conf.VerifyListen); err != nil {
+			log.Println(err)
+			return
+		}
+		defer stopServer_()
 	}
 	// Verify Domains.
 	if err = verifyHttpCsrHash(client_, &certInfo_); err != nil {

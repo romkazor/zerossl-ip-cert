@@ -39,6 +39,10 @@ certConfigs:
     # fixed
     verifyMethod: HTTP_CSR_HASH
     # verify hook executable, will be called before verifying domains
+    # Leave verifyHook empty to use the built-in validation server instead of an
+    # external hook. verifyListen then overrides its address (default: port 80
+    # from the challenge URL, which is the only port ZeroSSL connects to).
+    # verifyListen: ":80"
     verifyHook: /var/local/zerossl/verify-hook.sh
     # post hook executable, will be called after certificates arrival
     postHook: /var/local/zerossl/post-hook.sh
