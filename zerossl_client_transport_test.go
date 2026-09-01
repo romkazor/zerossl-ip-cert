@@ -311,3 +311,48 @@ func TestCountOccupiedSlots(t *testing.T) {
 		t.Errorf("certificate_status = %q, must contain %q", gotStatus_, CertStatus.Revoked)
 	}
 }
+
+// A certificate the tool is waiting on is unfinished by definition, so the sweep
+// has to be told to leave it alone -- otherwise it cancels the very certificate
+// kept for a later run to resume, and a replacement gets requested for nothing.
+func TestCleanUnfinishedExceptSkipsKeptID(t *testing.T) {
+	var cancelled_ []string
+	page_ := 0
+	srv_ := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/cancel") {
+			parts_ := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+			cancelled_ = append(cancelled_, parts_[len(parts_)-2])
+			_, _ = io.WriteString(w, `{"success":1}`)
+			return
+		}
+		page_++
+		if page_ > 1 {
+			// After the sweep only the kept certificate is left unfinished.
+			_, _ = io.WriteString(w, `{"total_count":1,"result_count":1,"results":[
+				{"id":"keep-me","status":"pending_validation","common_name":"203.0.113.10"}
+			]}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"total_count":2,"result_count":2,"results":[
+			{"id":"keep-me","status":"pending_validation","common_name":"203.0.113.10"},
+			{"id":"sweep-me","status":"draft","common_name":"203.0.113.11"}
+		]}`)
+	}))
+	defer srv_.Close()
+
+	c_ := NewClient("k", 100)
+	c_.HTTPClient = srv_.Client()
+	c_.HTTPClient.Transport = rewriteHost{base: srv_.URL, rt: srv_.Client().Transport}
+
+	if err := c_.CleanUnfinishedExcept("keep-me", ""); err != nil {
+		t.Fatalf("CleanUnfinishedExcept: %v", err)
+	}
+	for _, id_ := range cancelled_ {
+		if id_ == "keep-me" {
+			t.Fatalf("cancelled the certificate that had to be kept: %v", cancelled_)
+		}
+	}
+	if len(cancelled_) != 1 || cancelled_[0] != "sweep-me" {
+		t.Errorf("cancelled = %v, want [sweep-me]", cancelled_)
+	}
+}

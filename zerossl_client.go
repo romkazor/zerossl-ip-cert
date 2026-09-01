@@ -229,10 +229,13 @@ func (c *Client) CancelCert(id string) (err error) {
 	return c.doActionRequest(req)
 }
 
-// RevokeCert revokes an issued certificate, freeing up the account quota slot it
-// occupies. Only certificates in issued status can be revoked; once a certificate
-// has expired neither cancel nor revoke works on it any more. Pass a reason from
-// RevokeReason, or an empty string for the ZeroSSL default.
+// RevokeCert revokes an issued certificate. Only certificates in issued status can
+// be revoked; once a certificate has expired neither cancel nor revoke works on it
+// any more. Pass a reason from RevokeReason, or an empty string for the ZeroSSL
+// default.
+//
+// This does NOT free an account quota slot: a revoked certificate keeps counting
+// exactly like an issued one, and only a cancelled one is free. See QuotaStatuses.
 func (c *Client) RevokeCert(id, reason string) (err error) {
 	req := ApiReqFactory.RevokeCertificate(c.ApiKey, id, reason)
 	return c.doActionRequest(req)
@@ -406,7 +409,24 @@ func (c *Client) CountOccupiedSlots() (int, error) {
 
 // CleanUnfinished cleans up unfinished certificates.
 func (c *Client) CleanUnfinished() (err error) {
+	return c.CleanUnfinishedExcept()
+}
+
+// CleanUnfinishedExcept cancels unfinished certificates but leaves the given ids
+// alone.
+//
+// A certificate this tool is still waiting on is "unfinished" by definition, so an
+// unguarded sweep cancels the very certificate that was kept for a later run to
+// resume -- and then a replacement is requested, which is exactly the waste the
+// resume exists to avoid. Verified live on 2026-09-01 before the exception existed.
+func (c *Client) CleanUnfinishedExcept(keep ...string) (err error) {
 	log.Println("Cleaning unfinished certificates")
+	keep_ := make(map[string]bool, len(keep))
+	for _, id_ := range keep {
+		if id_ != "" {
+			keep_[id_] = true
+		}
+	}
 
 	const perPage = 100
 	// Cancelling removes certificates from the draft,pending_validation result
@@ -426,8 +446,15 @@ func (c *Client) CleanUnfinished() (err error) {
 			round_+1, certs.ResultCount, certs.TotalCount)
 
 		cancelled_ := 0
+		skipped_ := 0
 		for _, cert := range certs.Results {
 			if cert.Status != CertStatus.Draft && cert.Status != CertStatus.PendingValidation {
+				continue
+			}
+			if keep_[cert.ID] {
+				log.Printf("Keeping %s in %s status, ID: %s (waiting on it)",
+					cert.CommonName, cert.Status, cert.ID)
+				skipped_++
 				continue
 			}
 			log.Printf("Cleaning %s in %s status, ID: %s", cert.CommonName, cert.Status, cert.ID)
@@ -438,8 +465,12 @@ func (c *Client) CleanUnfinished() (err error) {
 			cancelled_++
 		}
 		// Nothing moved: either the page holds only certificates we cannot
-		// cancel, or every cancel failed. Retrying would loop forever.
+		// cancel, are deliberately keeping, or every cancel failed. Retrying
+		// would loop forever.
 		if cancelled_ == 0 {
+			if skipped_ > 0 {
+				log.Printf("Kept %d certificate(s) still being waited on", skipped_)
+			}
 			return nil
 		}
 	}

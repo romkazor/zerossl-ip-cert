@@ -284,7 +284,8 @@ reject every perfectly normal verification response. Any future `success` check 
 | Full issue → `revoke(Superseded)` | status becomes `revoked`; the quota slot is **not** released — see the correction below |
 | `POST /certificates` at the cap, plain | `code 2817`, `certificate_limit_reached` — no draft is created |
 | `POST /certificates` at the cap, with `replacement_for_certificate` | **accepted and issued** — the limit does not apply to renewal |
-| time from challenge published to `issued` | 90 s twice, over 11 min once — latency varies widely |
+| time from challenge published to `issued` | 90 s on most runs, **~14 min** on one that still succeeded |
+| `POST /certificates` past the cap, plain, any identifier | `2817` — the quota check fires before the duplicate check |
 | `POST /certificates` for an IP that already has a live cert on **another** account | `code 2839`, `duplicate_certificates_found`; `strict_domains: 0` does not lift it |
 | `GET /certificates/{id}` for another account's certificate | `code 2801`, `permission_denied` |
 | `search=203.0.113` | returns `203.0.113.10` — search matches substrings |
@@ -378,11 +379,14 @@ renewal on the existing account works indefinitely, the honest answer is usually
 
 ### Issuance latency, and why the tool no longer cares
 
-Measured on one host with an identical challenge, minutes apart: **90 seconds** on four occasions, and
-**stuck past 11 and past 15 minutes** on two others. Slot occupancy does not explain it — successes and
-stalls both happened at 4 and at 6 occupied slots — and the stall has not reproduced since. Treat the cause
-as unknown; a stuck `pending_validation` says nothing about why. `accountHint` appends the slot count to a
-timeout as context only, never as a diagnosis.
+Measured across many runs on two hosts: **90 seconds** most of the time, and **about 14 minutes** on one
+run that nevertheless finished normally. Slot occupancy does not explain the spread — issuance succeeded at
+3, 4, 5 and 6 occupied slots.
+
+That 14-minute run settles what earlier looked like a lottery: the two "failures" recorded before were
+simply cancelled at 11 and at 15 minutes, right on the edge. There is no lottery, only a long tail, and the
+old 5-minute bound sat well inside it. `accountHint` appends the slot count to a timeout as context only,
+never as a diagnosis.
 
 Chasing the right timeout is the wrong fix anyway, because the old failure mode was not the waiting but the
 **abandoning**: on timeout the tool dropped the certificate, ZeroSSL issued it minutes later, and it sat
@@ -403,6 +407,17 @@ The daily cron therefore self-heals: a run that times out costs nothing, and the
 certificate. Nothing is ever requested twice, so no extra slot is burned. Verified live on 2026-09-01 by
 `kill -9` mid-wait — the next run resumed the same id, installed it, and `openssl` confirmed the installed
 certificate matches the key kept by the interrupted run.
+
+**`cleanUnfinished` has to be told to spare it.** A certificate being waited on is `pending_validation`, so
+the sweep cancels it and the resume then finds nothing to resume — which is what happened the first time
+this was tested end to end, with the tool cheerfully requesting a replacement. Both call sites now pass the
+pending id to `Client.CleanUnfinishedExcept`, and `CleanUnfinished()` is kept as the no-exception wrapper so
+the library API stays source compatible.
+
+**The success path must not append blindly either.** `issueCertImpl` creates a state entry to park the
+pending certificate, so a first issue that then appended its own left two entries for one `confId` — one of
+them with an empty `certId`, which `renew()` would walk on every future run. `recordIssued` updates in place
+instead. Both faults were found by running the series, not by reading the code.
 
 `waitCertAttempts` is 30 (15 minutes), which is now a comfort setting rather than a correctness one.
 

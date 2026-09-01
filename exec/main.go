@@ -190,25 +190,44 @@ func issueCert(conf *CertConf) (err error) {
 	log.Printf("Cert for domain %v does not exist, try issue.\n", conf.CommonName)
 	client_ := apiClient(conf.ApiKey)
 	if usingConfig.CleanUnfinished {
-		if err := client_.CleanUnfinished(); err != nil {
+		// Never sweep away the certificate we are about to resume.
+		if err := client_.CleanUnfinishedExcept(pendingIDFor(conf)); err != nil {
 			log.Printf("Failed to clean unfinished issuing certificate: %v\n", err)
 		}
 	}
 	certId_, err := issueCertImpl(conf, "")
 	if err == nil {
 		log.Printf("Cert for domain %v issued successfully.\n", conf.CommonName)
-		currentData.Certs = append(currentData.Certs, CurrentCertData{
-			CommonName: conf.CommonName,
-			CertID:     certId_,
-			CertFile:   conf.CertFile,
-			KeyFile:    conf.KeyFile,
-			ConfID:     conf.ConfID,
-		})
-		if err = WriteCurrentData(currentDataFilePath, currentData); err != nil {
-			log.Printf("Failed to write current data: %v\n", err)
-		}
+		recordIssued(conf, certId_)
 	}
 	return
+}
+
+// recordIssued points this config's state entry at certID, creating the entry only
+// when there is none.
+//
+// It must not append blindly: issueCertImpl may already have created an entry to
+// park the pending certificate, and a second one for the same confId would make
+// renew() walk the config twice -- once against an empty certId.
+func recordIssued(conf *CertConf, certID string) {
+	for i := range currentData.Certs {
+		if currentData.Certs[i].ConfID == conf.ConfID {
+			currentData.Certs[i].CommonName = conf.CommonName
+			currentData.Certs[i].CertID = certID
+			currentData.Certs[i].CertFile = conf.CertFile
+			currentData.Certs[i].KeyFile = conf.KeyFile
+			persistState()
+			return
+		}
+	}
+	currentData.Certs = append(currentData.Certs, CurrentCertData{
+		CommonName: conf.CommonName,
+		ConfID:     conf.ConfID,
+		CertID:     certID,
+		CertFile:   conf.CertFile,
+		KeyFile:    conf.KeyFile,
+	})
+	persistState()
 }
 
 // pendingDir holds the private key of a certificate that has been requested but is
@@ -725,7 +744,8 @@ func renewCert(id string, conf *CertConf) (err error) {
 		return nil
 	}
 	if usingConfig.CleanUnfinished {
-		if err := client_.CleanUnfinished(); err != nil {
+		// Never sweep away the certificate we are about to resume.
+		if err := client_.CleanUnfinishedExcept(pendingIDFor(conf)); err != nil {
 			log.Printf("Failed to clean unfinished issuing certificate: %v\n", err)
 		}
 	}
@@ -850,7 +870,7 @@ func revokeSuperseded(client *zerosslIPCert.Client, id string) {
 		log.Printf("Superseded cert %v is in %v status, nothing to revoke.\n", id, certInfo_.Status)
 		return
 	}
-	log.Printf("Revoking superseded cert %v to free the account quota slot\n", id)
+	log.Printf("Revoking superseded cert %v, which the host no longer serves\n", id)
 	if err = client.RevokeCert(id, zerosslIPCert.RevokeReason.Superseded); err != nil {
 		log.Printf("Failed to revoke superseded cert %v: %v\n", id, err)
 		return

@@ -253,3 +253,38 @@ func TestPendingIDOmittedWhenEmpty(t *testing.T) {
 		t.Errorf("empty pending id was written out:\n%s", out_)
 	}
 }
+
+// A fresh issue must not leave two entries for one confId: issueCertImpl creates an
+// entry to park the pending certificate, and the success path has to update it
+// rather than append beside it. renew() walking a duplicate with an empty certId is
+// exactly the bug this pins.
+func TestRecordIssuedUpdatesPendingEntry(t *testing.T) {
+	withTempState(t)
+	conf_ := &CertConf{ConfID: "c1", CommonName: "203.0.113.10",
+		CertFile: "/tmp/cert.pem", KeyFile: "/tmp/key.pem"}
+
+	// What issueCertImpl leaves behind after CreateCert on a first issue.
+	setPendingID(conf_, "pending-id")
+	recordIssued(conf_, "final-id")
+
+	if len(currentData.Certs) != 1 {
+		t.Fatalf("entries = %d, want 1: %+v", len(currentData.Certs), currentData.Certs)
+	}
+	got_ := currentData.Certs[0]
+	if got_.CertID != "final-id" || got_.ConfID != "c1" {
+		t.Errorf("entry = %+v, want certId final-id for confId c1", got_)
+	}
+	if got_.CertFile != conf_.CertFile || got_.KeyFile != conf_.KeyFile {
+		t.Errorf("paths not filled in: %+v", got_)
+	}
+}
+
+// With no entry at all, recordIssued creates one.
+func TestRecordIssuedCreatesEntry(t *testing.T) {
+	withTempState(t)
+	conf_ := &CertConf{ConfID: "c9", CommonName: "203.0.113.99"}
+	recordIssued(conf_, "id-9")
+	if len(currentData.Certs) != 1 || currentData.Certs[0].CertID != "id-9" {
+		t.Fatalf("state = %+v, want one entry id-9", currentData.Certs)
+	}
+}
