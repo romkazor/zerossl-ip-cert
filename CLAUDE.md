@@ -286,6 +286,7 @@ reject every perfectly normal verification response. Any future `success` check 
 | `POST /certificates` at the cap, with `replacement_for_certificate` | **accepted and issued** — the limit does not apply to renewal |
 | time from challenge published to `issued` | 90 s on most runs, **~14 min** on one that still succeeded |
 | `POST /certificates` past the cap, plain, any identifier | `2817` — the quota check fires before the duplicate check |
+| create on a fresh account for an IP whose only other certs are **revoked** | **accepted** — revoking lifts `2839` |
 | `POST /certificates` for an IP that already has a live cert on **another** account | `code 2839`, `duplicate_certificates_found`; `strict_domains: 0` does not lift it |
 | `GET /certificates/{id}` for another account's certificate | `code 2801`, `permission_denied` |
 | `search=203.0.113` | returns `203.0.113.10` — search matches substrings |
@@ -372,10 +373,21 @@ identifiers without complaint. `strictDomains: 0` does not lift it. Only a creat
 replacement of a certificate **the account itself owns** gets through — and that cannot cross accounts,
 since `GET /certificates/{id}` on a foreign certificate is `2801 permission_denied`.
 
-The consequence: **moving a certificate to a different ZeroSSL account is not a key swap.** The old
-certificate has to be gone first, and neither route is clean — revoking it is irreversible and it is
-unverified whether that even lifts `2839`, while waiting for expiry means a scheduled gap. Given that
-renewal on the existing account works indefinitely, the honest answer is usually *do not move accounts*.
+**Revoking does lift it.** Verified 2026-09-01: an IP whose six certificates on one account had all been
+revoked, and which had no `issued` certificate anywhere, was accepted for a fresh create on a brand new
+account. So `2839` tracks a *live* certificate, not the identifier's history. The probe costs nothing — the
+rejection arrives at create time, so a single `POST` answers it and the draft is cancelled straight after,
+and a cancelled certificate occupies no slot.
+
+The consequence: **moving a certificate to a different ZeroSSL account is possible, but never a plain key
+swap.** The order is forced — revoke on the old account first, then issue on the new one — and revoking is
+irreversible, so the host serves a revoked certificate for however long issuance takes (90 seconds to about
+14 minutes, see below). Note also that `-renew` cannot do the second half: the new account cannot see the
+old certificate, so the run has to be a plain one, which takes the `errCertGone` path and issues from
+scratch.
+
+Given that renewal on the existing account keeps working past the allowance, moving accounts is a fallback,
+not a routine.
 
 ### Issuance latency, and why the tool no longer cares
 
