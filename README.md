@@ -6,10 +6,13 @@ ZeroSSL removed the `Delete Certificate` API endpoint, and on a free account eve
 `pending_validation`, `issued` **or `expired`** status counts against the 3-certificate quota. An expired
 certificate can be neither cancelled nor revoked, so it holds its slot forever.
 
-zerossl-ip-cert works around this by **revoking the superseded certificate right after the new one is
-installed** (`revokeOldOnRenew`, on by default), which releases the slot while the certificate is still
-`issued`. Combined with `cleanUnfinished`, renewal on a free account keeps working indefinitely and never
-occupies more than 2 of the 3 slots.
+A `revoked` certificate counts too: an account holding 1 `issued` and 3 `revoked` reports `4 / 3` and
+rejects any new certificate with `certificate_limit_reached`. So **revoking does not buy a slot back**, and a
+free account genuinely cannot renew forever — plan on 3 certificates and no more.
+
+What zerossl-ip-cert does do is stop wasting them: `cleanUnfinished` cancels leftover `draft` and
+`pending_validation` certificates, which are the only ones that can be released, and `revokeOldOnRenew`
+(on by default) makes sure a superseded key stops being valid once the host no longer serves it.
 
 zerossl-ip-cert is a automation tool for issuing ZeroSSL IP certificates.
 
@@ -71,7 +74,7 @@ Two top-level options matter for quota and API compatibility:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `revokeOldOnRenew` | `true` | Revoke the superseded certificate once the new one is installed, freeing its quota slot. Set to `false` to keep the old certificate until it expires. |
+| `revokeOldOnRenew` | `true` | Revoke the superseded certificate once the new one is installed, so a key the host no longer serves stops being valid. This does **not** free a quota slot. Set to `false` to leave the old certificate valid until it expires. |
 | `legacyQueryAuth` | `false` | Also send the deprecated `?access_key=` query parameter. The recommended `Authorization: ApiKey <key>` header is always sent. |
 
 And one per certificate entry:

@@ -20,6 +20,7 @@ import (
 	"sync"
 
 	"crypto/x509/pkix"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -159,6 +160,13 @@ func issueCerts() {
 	}
 }
 
+// errCertGone reports that the certificate current.yaml points at exists neither
+// under its recorded id nor under the config's common name. The usual cause is a
+// state file that outlived the account it was written for -- an API key moved to a
+// different ZeroSSL account, say. Renewal cannot proceed from that, but a plain run
+// can start over, which is what issueCert does with it.
+var errCertGone = errors.New("tracked certificate not found in the API")
+
 // issueCert issues a cert for the given domain config.
 func issueCert(conf *CertConf) (err error) {
 	for _, cert := range currentData.Certs {
@@ -166,7 +174,17 @@ func issueCert(conf *CertConf) (err error) {
 		if cert.ConfID == conf.ConfID {
 			log.Printf("Cert for domain %v already exists, try renew.\n", conf.CommonName)
 			err = renewCert(cert.CertID, conf)
-			return
+			if !errors.Is(err, errCertGone) {
+				return
+			}
+			// The state entry survives an account it can no longer be found in, and
+			// while it is there every run keeps taking the renewal path and failing.
+			// Drop it and fall through to a fresh issue -- only on a plain run, since
+			// -renew deliberately never creates a certificate from scratch.
+			log.Printf("State entry for %v matches no certificate on this account, issuing a new one\n",
+				conf.CommonName)
+			dropCertState(cert.CertID)
+			break
 		}
 	}
 	log.Printf("Cert for domain %v does not exist, try issue.\n", conf.CommonName)
@@ -515,7 +533,7 @@ func renewCert(id string, conf *CertConf) (err error) {
 		resolved_, resolveErr_ := client_.ResolveIssuedCert(conf.CommonName)
 		if resolveErr_ != nil {
 			log.Printf("No issued cert for %v either: %v\n", conf.CommonName, resolveErr_)
-			return err
+			return fmt.Errorf("%w (id %v): %v", errCertGone, id, err)
 		}
 		log.Printf("Recovered cert %v (expires %v) for %v\n", resolved_.ID, resolved_.Expires, conf.CommonName)
 		id, certInfo_ = resolved_.ID, resolved_
@@ -597,6 +615,18 @@ func renewalNotDue(certInfo *zerosslIPCert.CertificateInfoModel, commonName stri
 
 // persistCertID rewrites the state entry keyed by stateID when the API turned out
 // to hold a different certificate id, so the next run starts from the truth.
+// dropCertState removes the state entry keyed by certID. It is only written back
+// to disk once the replacement certificate has been issued, so a failure in
+// between leaves the old entry in place rather than an empty state file.
+func dropCertState(certID string) {
+	for i, c := range currentData.Certs {
+		if c.CertID == certID {
+			currentData.Certs = append(currentData.Certs[:i], currentData.Certs[i+1:]...)
+			return
+		}
+	}
+}
+
 func persistCertID(stateID, actualID string, conf *CertConf) {
 	if stateID == actualID {
 		return
@@ -618,11 +648,15 @@ func persistCertID(stateID, actualID string, conf *CertConf) {
 	}
 }
 
-// revokeSuperseded revokes the certificate that has just been replaced, which
-// releases the account quota slot it holds. On a free account draft,
-// pending_validation, issued and expired certificates all count against the
-// 3-certificate quota, and an expired one can neither be cancelled nor revoked --
-// so the old certificate has to be revoked while it is still issued.
+// revokeSuperseded revokes the certificate that has just been replaced, so that a
+// key the server no longer serves stops being valid.
+//
+// It does NOT free an account quota slot: a revoked certificate keeps counting
+// against the free plan's allowance exactly like an issued one (verified against
+// the live API -- see CLAUDE.md section 6). Only a cancelled draft is never counted,
+// and cancelling requires a certificate that was never issued. Do not reintroduce
+// the claim that revoking buys back quota; it was wrong once already.
+//
 // A failure here is logged but never fails the renewal: the new certificate is
 // already installed at this point.
 func revokeSuperseded(client *zerosslIPCert.Client, id string) {

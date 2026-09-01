@@ -17,6 +17,8 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -110,5 +112,49 @@ func TestSampleHooksParse(t *testing.T) {
 		if _, err := os.Stat(name_); err != nil {
 			t.Errorf("%v: %v", name_, err)
 		}
+	}
+}
+
+// A state entry that matches no certificate on the account must be droppable, so
+// that a plain run can issue from scratch instead of retrying a renewal forever.
+func TestDropCertState(t *testing.T) {
+	saved_ := currentData
+	t.Cleanup(func() { currentData = saved_ })
+
+	currentData = &CurrentData{Certs: []CurrentCertData{
+		{ConfID: "a", CertID: "id-a"},
+		{ConfID: "b", CertID: "id-b"},
+		{ConfID: "c", CertID: "id-c"},
+	}}
+
+	dropCertState("id-b")
+	if len(currentData.Certs) != 2 {
+		t.Fatalf("expected 2 entries left, got %d", len(currentData.Certs))
+	}
+	for _, c_ := range currentData.Certs {
+		if c_.CertID == "id-b" {
+			t.Fatalf("id-b is still present: %+v", currentData.Certs)
+		}
+	}
+	if currentData.Certs[0].CertID != "id-a" || currentData.Certs[1].CertID != "id-c" {
+		t.Fatalf("surviving entries reordered: %+v", currentData.Certs)
+	}
+
+	// An unknown id must be a no-op rather than a panic or a truncation.
+	dropCertState("id-missing")
+	if len(currentData.Certs) != 2 {
+		t.Fatalf("unknown id changed the state: %+v", currentData.Certs)
+	}
+}
+
+// issueCert distinguishes "this certificate is gone" from every other renewal
+// failure by sentinel, so the wrapping has to survive fmt.Errorf.
+func TestErrCertGoneIsIdentifiable(t *testing.T) {
+	wrapped_ := fmt.Errorf("%w (id %v): %v", errCertGone, "abc123", errors.New("certificate_not_found"))
+	if !errors.Is(wrapped_, errCertGone) {
+		t.Fatalf("wrapped error no longer matches errCertGone: %v", wrapped_)
+	}
+	if errors.Is(errors.New("some other failure"), errCertGone) {
+		t.Fatal("an unrelated error matched errCertGone")
 	}
 }

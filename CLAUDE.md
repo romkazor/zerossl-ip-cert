@@ -146,6 +146,11 @@ API key, a restored backup, or a state write that failed after the old certifica
 - `renewUntrackedConfigs` — for config entries with no state entry at all. Without it, a lost `current.yaml`
   turned `-renew` into a silent no-op forever, since `renew()` only walks the state. It adopts an existing
   certificate; it never issues one from scratch (that stays a job for a run without `-renew`).
+- `issueCert` handles the opposite drift: when the tracked certificate is found neither by its id nor by
+  common name, `renewCert` returns `errCertGone`, the dead state entry is dropped and a **plain run issues
+  from scratch**. This is what makes moving `apiKey` to a different ZeroSSL account work — the stale `certId`
+  would otherwise send every future run down the renewal path to the same failure. `-renew` still returns the
+  error: creating a certificate out of nothing is deliberately not its job.
 
 `ListCerts`' `search` matches **substrings** (`search=203.0.113` returns `203.0.113.10`), so `ResolveIssuedCert`
 compares the common name exactly and picks the latest `Expires`.
@@ -185,7 +190,7 @@ Both are optional and live at the top level next to `cleanUnfinished`:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `revokeOldOnRenew` | `true` (a `*bool` field, `nil` → true) | revoke the superseded certificate, freeing its quota slot |
+| `revokeOldOnRenew` | `true` (a `*bool` field, `nil` → true) | revoke the superseded certificate, so a key the host no longer serves stops being valid. It does **not** free a quota slot — see §6 |
 | `legacyQueryAuth` | `false` | additionally send the deprecated `?access_key=` |
 
 And one per `certConfigs[]` entry:
@@ -276,7 +281,8 @@ reject every perfectly normal verification response. Any future `success` check 
 | Invalid key | HTTP 401, `code 101`, `type invalid_access_key` |
 | `GET /certificates/{unknown}` | `code 2803`, `certificate_not_found` |
 | `download/return` on a draft | `code 2832`, `certificate_not_issued` |
-| Full issue → `revoke(Superseded)` | status becomes `revoked`, **and the quota slot is released** |
+| Full issue → `revoke(Superseded)` | status becomes `revoked`; the quota slot is **not** released — see the correction below |
+| `POST /certificates` at the cap | `code 2817`, `certificate_limit_reached` — no draft is created |
 | `search=203.0.113` | returns `203.0.113.10` — search matches substrings |
 
 The error object is exactly `{"code":int,"type":string,"info":string}`, which is what `ApiErrorModel`
@@ -292,25 +298,50 @@ Cancelled certificates stay visible in `ListCerts` with status `cancelled` but d
 after four create+cancel cycles, a query for `draft,pending_validation,issued,expired` returned
 `total_count = 0`.
 
-**The revoke strategy of §6 is confirmed end to end**, twice.
-
-First in isolation: a certificate was issued for real (challenge published through a live verify hook,
-`issued` after 120s), then revoked with `Superseded` — status became `revoked` and the occupied-slot count
-went from 2 back to 1.
-
-Then as the **actual renewal chain**, driven by the tool itself on an isolated config (`renewBeforeDays: 200`
-forces the renewal path on a fresh certificate). Four assumptions that the isolated test could not reach were
-each confirmed:
+The **renewal chain** was driven end to end by the tool itself on an isolated config
+(`renewBeforeDays: 200` forces the renewal path on a fresh certificate). These observations stand:
 
 | Assumption | Outcome |
 |---|---|
 | `replacement_for_certificate` is accepted with a live hash | accepted; the new cert came back with `replacement_for` set to the old id |
-| the old cert stays `issued` after its replacement is issued | it does — otherwise `revokeSuperseded` would silently skip the revoke and never free the slot |
+| the old cert stays `issued` after its replacement is issued | it does — otherwise `revokeSuperseded` would silently skip the revoke |
 | the whole `renewCert` order works (issue → install → write state → revoke) | ran clean, state ended up pointing at the new id |
-| 3 occupied slots at the peak still fit the free plan | it does: production + old + new = 3 of 3, and the create succeeded |
+| a 4th certificate could still be created while 3 were occupied | it could, so the cap is not enforced exactly where the account page counts |
 
-Peak occupancy during a renewal is therefore `existing certs + 1`. On a free account with one certificate
-under management that is 2 of 3, leaving one slot of headroom.
+### Correction (2026-09-01): revoking does NOT free a quota slot
+
+An earlier revision of this file claimed it did, and that claim was load-bearing for the entire
+"free renewal is indefinite" story. **It was wrong.** How it was mis-verified is worth recording, because the
+same trap is easy to walk into again: the check counted
+`certificate_status=draft,pending_validation,issued,expired` before and after a revoke and watched it go
+2 → 1. That status list **does not contain `revoked`**, so a revoked certificate leaves the result set by
+definition. The measurement was a tautology dressed up as evidence — it never touched ZeroSSL's own counter.
+
+What the account actually reports, holding 1 `issued`, 3 `revoked`, 4 `cancelled` and nothing else:
+
+```
+account page:  4 / 3  90-Day Certificates      →  4 = issued(1) + revoked(3); cancelled excluded
+POST /certificates  →  {"success":false,"error":{"code":2817,"type":"certificate_limit_reached"}}
+```
+
+So a **`revoked` certificate keeps occupying its slot**, exactly like an `issued` one, and the account is
+hard blocked from creating anything at all. Only `cancelled` is free of charge, and cancelling requires a
+certificate that was never issued in the first place.
+
+That makes the upstream README warning — "free account can't renew certificate infinitely" — **accurate**,
+and the note that used to call it stale wrong.
+
+**Still unknown:** whether a slot is ever released, and when. Every certificate on the account was created on
+the same day, so there is no observation of what happens at a certificate's original expiry. Two models fit
+the evidence equally well:
+
+| Model | Consequence |
+|---|---|
+| the slot is held until the certificate's original `expires`, revoked or not | slots come back at that date, and a renewal needing 2 of 3 works |
+| the slot is never released except by cancelling a draft | a free account allows 3 issuances **ever**, and renewal is impossible by design |
+
+Do not write either down as fact until one is actually observed. The operational conclusion is the same
+either way: **never spend slots on live experiments against an account that carries production.**
 
 ### Parameters and values
 
@@ -337,10 +368,12 @@ under management that is 2 of 3, leaving one slot of headroom.
   the draft.
 - `cancel` works **only** for `draft`/`pending_validation`. `revoke` works **only** for `issued`.
   **An `expired` certificate can be neither cancelled nor revoked.**
-- Hence the README warning: "ZeroSSL removed the `Delete Certificate` API endpoint, free account can't renew
-  certificate infinitely". The part about the removed `Delete` is correct, but the **conclusion is stale**:
-  `revoke` does exist, and revoking the old certificate **before** it expires frees the slot, which makes
-  renewal indefinite.
+- **`revoked` counts as well.** Verified 2026-09-01: an account holding 1 `issued` + 3 `revoked` reports
+  `4 / 3` and rejects `POST /certificates` with `code 2817, certificate_limit_reached` (§5). Revoking buys
+  back nothing.
+- Hence the upstream README warning — "ZeroSSL removed the `Delete Certificate` API endpoint, free account
+  can't renew certificate infinitely" — **is accurate**. An earlier revision of this file called that
+  conclusion stale; that was the mistake corrected in §5.
 
 ### Implemented strategy
 
@@ -358,7 +391,14 @@ A fresh `GetCert` precedes the revoke: we only revoke while the old certificate 
 Disabled with `revokeOldOnRenew: false`. On top of that, all `draft`/`pending_validation` certificates are
 cancelled before issuing (`cleanUnfinished: true`).
 
-With this ordering, at most 2 of the 3 slots are occupied at any time.
+`revokeOldOnRenew` is therefore a **security** setting, not a quota one: it stops a superseded key from
+staying valid once the host no longer serves it. That is reason enough to leave it on, but it neither helps
+nor hurts the certificate count.
+
+Quota has to be planned elsewhere: keep **one** certificate per free account under management, never issue
+test certificates on an account that carries production, and treat the 3-certificate allowance as the hard
+ceiling it is. If the account does fill up, the only remedies are upgrading the plan or moving to a different
+account — there is no API call that buys a slot back.
 
 ### Limits specific to IP certificates
 
@@ -431,7 +471,10 @@ Listed as they stand in the code; the fix history is in §8.
 
 1. ~~**Auth**: move to `Authorization: ApiKey <key>`~~ — done. Header always, query parameter behind
    `legacyQueryAuth: false`.
-2. ~~**Free quota**: `RevokeCert`, `replacement_for_certificate`, `CertStatus.Revoked`, the strategy from §6~~ — done.
+2. **Free quota**: `RevokeCert`, `replacement_for_certificate` and `CertStatus.Revoked` are implemented and
+   work. The *goal* they were meant to serve is not met: revoking does not free a slot (§5), so a free
+   account still cannot renew indefinitely. **Remaining**: nothing to build here — the ceiling is ZeroSSL's,
+   not ours.
 3. ~~**API errors**~~ — done: shared `decodeJSON`, body included on `>=400`, `embeddedError` on HTTP 200,
    `ApiErrorModel` as an `error`. The `VerifyDomains` + `HTTP_CSR_HASH` exception is respected.
 4. ~~**Built-in HTTP validation server**~~ — done: `exec/verify_server.go`, engaged only when `verifyHook`
@@ -456,7 +499,9 @@ Listed as they stand in the code; the fix history is in §8.
 (covered by `exec/config_defaults_test.go`); the `current.yaml` format did not change.
 
 Two deliberate departures from "defaults reproduce the current behaviour" — they are the point of the task:
-- `revokeOldOnRenew` defaults to **true**: without revoking, a free account hits the limit after ~3 renewal cycles;
+- `revokeOldOnRenew` defaults to **true**: a superseded key should stop being valid once it is off the host.
+  (It was originally defaulted on for quota reasons; that rationale turned out to be wrong — see §5 — but the
+  security one stands on its own.)
 - authentication defaults to the **header**, not the query parameter.
 
 Breaking changes to the library API (for external importers of the package):
@@ -580,7 +625,7 @@ nginx -s reload
 dataDir: /var/local/zerossl        # state, logs and the temp dir live here (0700)
 logFile: /var/local/zerossl/log.txt
 cleanUnfinished: true              # cancel leftover draft/pending before issuing
-revokeOldOnRenew: true             # frees the quota slot; keep on for free accounts
+revokeOldOnRenew: true             # kills the superseded key; does NOT free a quota slot
 legacyQueryAuth: false             # header auth only; true also sends ?access_key=
 
 certConfigs:
@@ -642,9 +687,10 @@ curl -sS -o /dev/null -w 'http=%{http_code} redirects=%{num_redirects}\n' \
 # cert and key must be one pair
 diff <(openssl x509 -in cert1.pem -noout -pubkey) <(openssl rsa -in key1.pem -pubout)
 
-# how many of the 3 free slots are taken
+# how many of the 3 free slots are taken -- `revoked` MUST be in this list, it counts
+# too, and leaving it out is exactly the mistake corrected in section 5
 curl -sS -H "Authorization: ApiKey $KEY" \
-  'https://api.zerossl.com/certificates?certificate_status=draft,pending_validation,issued,expired&limit=100'
+  'https://api.zerossl.com/certificates?certificate_status=draft,pending_validation,issued,revoked,expired&limit=100'
 ```
 
 A `404` on the redirect check usually means the `location / { return 301 ... }` block
